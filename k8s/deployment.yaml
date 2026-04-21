@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server-web
+  namespace: llmmllab-mcp
+  labels:
+    app: mcp-server-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-server-web
+  template:
+    metadata:
+      labels:
+        app: mcp-server-web
+    spec:
+      containers:
+        - name: mcp-server-web
+          image: 192.168.0.71:31500/mcp-server-web:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          env:
+            - name: SEARX_HOST
+              value: "http://searxng.llmmllab.svc.cluster.local:8080"
+            - name: SEARX_ENGINES
+              value: "google,bing,duckduckgo,startpage"
+            - name: SEARX_MAX_RESULTS
+              value: "10"
+            - name: MAX_CONTENT_LENGTH
+              value: "8000"
+            - name: REQUEST_TIMEOUT
+              value: "30"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      imagePullSecrets:
+        - name: registry-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+
+---
+# Service for Web MCP Server (internal cluster access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-web
+  namespace: llmmllab-mcp
+  labels:
+    app: mcp-server-web
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    app: mcp-server-web
