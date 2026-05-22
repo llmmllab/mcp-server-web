@@ -8,6 +8,7 @@ Fetches and extracts readable text content from web pages, including:
 """
 
 import asyncio
+import logging
 from typing import Optional, Tuple
 
 import aiohttp
@@ -16,6 +17,7 @@ from urllib.parse import urlparse
 
 from config import (
     BROWSER_HEADERS,
+    FETCH_HARD_TIMEOUT,
     FRAMEWORK_MARKERS,
     MAX_CONTENT_LENGTH,
     REQUEST_TIMEOUT,
@@ -23,6 +25,8 @@ from config import (
     SPA_SCRIPT_RATIO,
 )
 from server import mcp
+
+logger = logging.getLogger("mcp-server-web.fetch")
 
 
 def _analyze_html(html_content: str) -> Tuple[str, bool]:
@@ -112,6 +116,38 @@ async def _process_html(url: str, html_content: str, allow_spa_fallback: bool) -
     return f"Content from {url}:\n\n{text_content}"
 
 
+async def _fetch_impl(url: str, render_js: bool) -> str:
+    """Inner fetch implementation; wrapped in ``asyncio.wait_for`` below."""
+    if render_js:
+        rendered = await _render_with_playwright(url)
+        if not rendered:
+            return "Error: Playwright rendering failed or not installed."
+        return await _process_html(url, rendered, allow_spa_fallback=False)
+
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    ) as session:
+        async with session.get(
+            url, headers=BROWSER_HEADERS, allow_redirects=True
+        ) as response:
+            if response.status >= 400:
+                return f"Error: HTTP {response.status} when accessing {url}"
+
+            content_type = response.headers.get("content-type", "").lower()
+            body = await response.text()
+
+            if "text/html" in content_type:
+                return await _process_html(url, body, allow_spa_fallback=True)
+
+            if "application/json" in content_type or "text/" in content_type:
+                return f"Content from {url}:\n\n{_truncate(body)}"
+
+            return (
+                f"Error: URL does not appear to contain readable text "
+                f"(content-type: {content_type})"
+            )
+
+
 @mcp.tool(
     name="fetch_page",
     description="Fetch and extract readable text content from a web page URL. Handles static HTML, SPAs (via Playwright), plain text, and JSON.",
@@ -123,6 +159,12 @@ async def fetch_page(url: str, render_js: bool = False) -> str:
     Handles HTML (static and SPA), plain text/markdown, JSON, and other
     text-based content. Auto-detects JavaScript-rendered pages and can
     fall back to Playwright rendering.
+
+    Reliability: a hard ``asyncio.wait_for`` wraps the entire fetch
+    (``FETCH_HARD_TIMEOUT`` seconds, default 75) on top of aiohttp's
+    internal ClientTimeout — aiohttp can hang on some DNS/TLS failure
+    modes and Playwright can spin past its 30s timeout while waiting on
+    selectors.  The outer wait_for guarantees a return.
 
     Args:
         url: The URL to read content from (must be http:// or https://).
@@ -138,36 +180,31 @@ async def fetch_page(url: str, render_js: bool = False) -> str:
     except Exception as e:
         return f"Error: Invalid URL format '{url}': {str(e)}"
 
-    if render_js:
-        rendered = await _render_with_playwright(url)
-        if not rendered:
-            return "Error: Playwright rendering failed or not installed."
-        return await _process_html(url, rendered, allow_spa_fallback=False)
-
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        ) as session:
-            async with session.get(
-                url, headers=BROWSER_HEADERS, allow_redirects=True
-            ) as response:
-                if response.status >= 400:
-                    return f"Error: HTTP {response.status} when accessing {url}"
-
-                content_type = response.headers.get("content-type", "").lower()
-                body = await response.text()
-
-                if "text/html" in content_type:
-                    return await _process_html(url, body, allow_spa_fallback=True)
-
-                if "application/json" in content_type or "text/" in content_type:
-                    return f"Content from {url}:\n\n{_truncate(body)}"
-
-                return f"Error: URL does not appear to contain readable text (content-type: {content_type})"
-
+        result = await asyncio.wait_for(
+            _fetch_impl(url, render_js), timeout=FETCH_HARD_TIMEOUT
+        )
+        logger.info(
+            "fetch_page completed",
+            extra={
+                "url": url,
+                "render_js": render_js,
+                "result_bytes": len(result),
+            },
+        )
+        return result
     except asyncio.TimeoutError:
-        return f"Error: Timeout when trying to access {url} ({REQUEST_TIMEOUT} seconds)"
+        msg = (
+            f"Error: Timeout when trying to access {url} "
+            f"({FETCH_HARD_TIMEOUT} seconds, hard cap)"
+        )
+        logger.warning(msg, extra={"url": url})
+        return msg
     except aiohttp.ClientError as e:
-        return f"Error: Network error when accessing {url}: {str(e)}"
+        msg = f"Error: Network error when accessing {url}: {str(e)}"
+        logger.warning(msg, extra={"url": url})
+        return msg
     except Exception as e:
-        return f"Error: Failed to read content from {url}: {str(e)}"
+        msg = f"Error: Failed to read content from {url}: {str(e)}"
+        logger.error(msg, extra={"url": url})
+        return msg

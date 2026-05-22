@@ -33,6 +33,13 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 SPA_TEXT_THRESHOLD = int(os.environ.get("SPA_TEXT_THRESHOLD", "50"))
 SPA_SCRIPT_RATIO = float(os.environ.get("SPA_SCRIPT_RATIO", "0.5"))
 
+# Hard outer timeouts wrapping aiohttp's internal ClientTimeout — defense-
+# in-depth.  aiohttp's timeout can hang in some DNS/TLS failure modes; the
+# asyncio.wait_for layer guarantees the tool returns a structured error
+# string within ``SEARCH_HARD_TIMEOUT`` / ``FETCH_HARD_TIMEOUT`` seconds.
+SEARCH_HARD_TIMEOUT = int(os.environ.get("SEARCH_HARD_TIMEOUT", "35"))
+FETCH_HARD_TIMEOUT = int(os.environ.get("FETCH_HARD_TIMEOUT", "75"))
+
 # Server configuration
 MCP_SERVER_BASE_URL = os.environ.get("MCP_SERVER_BASE_URL")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "http")

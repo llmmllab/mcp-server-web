@@ -1,0 +1,45 @@
+name: Deploy MCP Server (web)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build & Deploy mcp-server-web
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & Deploy
+        run: |
+          set -euo pipefail
+          REGISTRY=192.168.0.71:31500
+          IMAGE=mcp-server-web
+          NAMESPACE=llmmllab-mcp
+          SHA=${{ github.sha }}
+          SHORT_SHA=$(echo $SHA | cut -c1-7)
+
+          echo "Building ${IMAGE} (SHA: $SHORT_SHA)..."
+
+          # Multi-arch build — k8s/deployment.yaml pins
+          # kubernetes.io/arch=arm64, but the registry serves both.
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t ${REGISTRY}/${IMAGE}:${SHA} \
+            -t ${REGISTRY}/${IMAGE}:latest \
+            --push \
+            .
+
+          # Apply manifests and roll the deployment so the new :latest is
+          # actually pulled by the kubelet on the next pod start.
+          echo "Deploying to Kubernetes (namespace ${NAMESPACE})..."
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s/deployment.yaml
+          kubectl rollout restart deployment/${IMAGE} -n "${NAMESPACE}"
+          kubectl rollout status  deployment/${IMAGE} -n "${NAMESPACE}" --timeout=300s
+
+          echo ""
+          echo "Deployed ${IMAGE}:${SHORT_SHA}"
+          echo "  Service: ${IMAGE}.${NAMESPACE}.svc.cluster.local:8000"
