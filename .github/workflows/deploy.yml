@@ -17,7 +17,7 @@ jobs:
           set -euo pipefail
           REGISTRY=192.168.0.71:31500
           IMAGE=mcp-server-web
-          NAMESPACE=llmmllab-mcp
+          NAMESPACE=llmmllab
           SHA=${{ github.sha }}
           SHORT_SHA=$(echo $SHA | cut -c1-7)
 

@@ -4,7 +4,7 @@
 
 set -e
 
-NAMESPACE="${NAMESPACE:-llmmllab-mcp}"
+NAMESPACE="${NAMESPACE:-llmmllab}"
 REGISTRY=${REGISTRY:-192.168.0.71:31500}
 TAG=${TAG:-latest}
 CREATE_NAMESPACE="$1"

@@ -1,4 +1,4 @@
-NAMESPACE ?= llmmllab-mcp
+NAMESPACE ?= llmmllab
 REGISTRY  ?= 192.168.0.71:31500
 IMAGE     ?= $(REGISTRY)/mcp-server-web
 TAG       ?= latest
