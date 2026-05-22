@@ -35,7 +35,7 @@ spec:
             periodSeconds: 30
           env:
             - name: SEARX_HOST
-              value: "http://searxng.llmmllab.svc.cluster.local:8080"
+              value: "http://searxng.searxng.svc.cluster.local:8080"
             - name: SEARX_ENGINES
               value: "google,bing,duckduckgo,startpage"
             - name: SEARX_MAX_RESULTS
