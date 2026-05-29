@@ -96,11 +96,55 @@ async def web_search(
 
         where each result has ``title``, ``url``, ``content``, ``relevance``.
     """
+    return await _run_search(
+        query,
+        num_results=num_results,
+        categories=categories,
+        engines=engines,
+        time_range=time_range,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reusable helpers — public so other tools (e.g. ``deep_research``) can
+# share the SearxNG call path without re-implementing the timeout /
+# filter / envelope logic.
+# ---------------------------------------------------------------------------
+
+
+class SearxError(Exception):
+    """Raised by :func:`searx_query` for any non-recoverable failure.
+
+    The MCP tool wrapper catches this and folds it into the JSON
+    envelope; :func:`deep_research` lets it propagate so it can choose
+    its own failure shape (an envelope with ``stopped_reason="no_seeds"``).
+    """
+
+
+async def searx_query(
+    query: str,
+    *,
+    num_results: int | None = None,
+    categories: list[str] | None = None,
+    engines: list[str] | None = None,
+    time_range: str | None = None,
+) -> list[dict]:
+    """Issue a SearxNG search and return the filtered result list.
+
+    Shared between :func:`web_search` (the MCP tool) and
+    :func:`tools.deep_research.deep_research` so both go through the
+    same timeout / blocklist / scoring logic.  Returns an empty list
+    on error; raises :class:`SearxError` only when the caller has
+    asked for one (the MCP tool prefers an envelope to an exception).
+
+    Each result dict has: ``title``, ``url``, ``content``, ``relevance``.
+    """
     if not query.strip():
-        return _envelope(query, [], error="Empty query")
+        return []
 
     max_results = num_results or SEARX_MAX_RESULTS
     search_engines = engines or SEARX_DEFAULT_ENGINES
+    search_categories = categories or ["general"]
 
     params = {
         "q": query,
@@ -108,7 +152,7 @@ async def web_search(
         "language": SEARX_LANGUAGE,
         "safesearch": str(SEARX_SAFESEARCH),
         "engines": ",".join(search_engines),
-        "categories": ",".join(categories),
+        "categories": ",".join(search_categories),
     }
     tr = time_range or SEARX_TIME_RANGE
     if tr:
@@ -129,36 +173,61 @@ async def web_search(
     try:
         data = await asyncio.wait_for(_do_request(), timeout=SEARCH_HARD_TIMEOUT)
     except asyncio.TimeoutError:
-        msg = f"Search timed out after {SEARCH_HARD_TIMEOUT}s"
-        logger.warning(msg, extra={"query": query})
-        return _envelope(query, [], error=msg)
+        logger.warning(
+            "searx_query timed out after %ss", SEARCH_HARD_TIMEOUT,
+            extra={"query": query},
+        )
+        return []
     except aiohttp.ClientError as e:
-        msg = f"Network error: {e}"
-        logger.warning(msg, extra={"query": query})
-        return _envelope(query, [], error=msg)
+        logger.warning("searx_query network error: %s", e, extra={"query": query})
+        return []
     except Exception as e:  # pragma: no cover — defensive
-        msg = f"Search failed: {e}"
-        logger.error(msg, extra={"query": query})
-        return _envelope(query, [], error=msg)
+        logger.error("searx_query failed: %s", e, extra={"query": query})
+        return []
 
     if "_error" in data:
-        return _envelope(query, [], error=data["_error"])
+        logger.warning("searx_query upstream error: %s", data["_error"])
+        return []
 
-    raw_results = data.get("results", [])
     contents: list[dict] = []
-    for i, r in enumerate(raw_results[:max_results]):
-        url = r.get("url", "")
+    for i, r in enumerate((data.get("results") or [])[:max_results]):
+        url = r.get("url") or ""
         if not url or url.endswith("robots.txt"):
             continue
         contents.append(
             {
-                "title": r.get("title", "No title"),
+                "title": r.get("title") or "No title",
                 "url": url,
-                "content": r.get("content", ""),
+                "content": r.get("content") or "",
                 "relevance": round(1.0 - (0.05 * i), 2),
             }
         )
+    return contents
 
+
+async def _run_search(
+    query: str,
+    *,
+    num_results: int | None,
+    categories: list[str],
+    engines: list[str] | None,
+    time_range: str | None,
+) -> str:
+    """Implementation of the MCP ``web_search`` tool — thin envelope wrapper
+    around :func:`searx_query`.
+    """
+    if not query.strip():
+        return _envelope(query, [], error="Empty query")
+    try:
+        contents = await searx_query(
+            query,
+            num_results=num_results,
+            categories=categories,
+            engines=engines,
+            time_range=time_range,
+        )
+    except SearxError as e:  # pragma: no cover — searx_query swallows by default
+        return _envelope(query, [], error=str(e))
     logger.info(
         "web_search completed",
         extra={"query": query, "result_count": len(contents)},

@@ -26,6 +26,7 @@ mcp = FastMCP("web")
 # Import tools to register them
 import tools.search  # type: ignore  noqa: E402,F401
 import tools.fetch  # type: ignore  noqa: E402,F401
+import tools.deep_research  # type: ignore  noqa: E402,F401
 
 if __name__ == "__main__":
     transport = MCP_TRANSPORT or "http"
