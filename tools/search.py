@@ -32,7 +32,6 @@ from config import (
     BROWSER_HEADERS,
     SEARCH_HARD_TIMEOUT,
 )
-from server import mcp
 
 logger = logging.getLogger("mcp-server-web.search")
 
@@ -55,10 +54,6 @@ def _envelope(
     return json.dumps(payload)
 
 
-@mcp.tool(
-    name="web_search",
-    description="Search the web using SearxNG. Returns structured results with titles, URLs, and content snippets.",
-)
 async def web_search(
     query: str,
     num_results: int | None = None,

@@ -26,7 +26,6 @@ from config import (
     SPA_TEXT_THRESHOLD,
     SPA_SCRIPT_RATIO,
 )
-from server import mcp
 
 logger = logging.getLogger("mcp-server-web.fetch")
 
@@ -321,10 +320,6 @@ async def _fetch_impl(url: str, render_js: bool) -> str:
             )
 
 
-@mcp.tool(
-    name="fetch_page",
-    description="Fetch and extract readable text content from a web page URL. Handles static HTML, SPAs (via Playwright), plain text, and JSON.",
-)
 async def fetch_page(url: str, render_js: bool = False) -> str:
     """
     Read and extract text content from a web page URL.
