@@ -21,8 +21,28 @@ Fetch and extract readable text from a URL. Handles static HTML, SPAs (auto-dete
 
 The extractor strips semantic boilerplate (`<nav>`, `<header>`, `<footer>`, `<aside>`, `<form>`) *plus* any tag whose `class` / `id` / `role` matches a boilerplate pattern (`sidebar`, `related-posts`, `comments`, `share-buttons`, `newsletter-signup`, `cookie-banner`, etc.). It preserves paragraph/heading boundaries (each block becomes its own `\n\n`-separated entry instead of collapsing everything to one space-joined string) and deduplicates adjacent/repeated blocks via a 120-char prefix MD5 — so the same headline appearing in the main article AND a "popular posts" widget shows up only once.
 
-### `deep_research`
+### `fetch_with_links` — the LLM-orchestrated research building block
+Fetch a web page and return both its cleaned text AND its outbound links, with anchor text and (when a `query` is supplied) a relevance score.  Pair with `web_search` for a turn-by-turn research loop the model drives natively — no server-side heuristic in the loop.
+
+- **url** (required): The page to fetch (http/https only)
+- **query**: Optional research question; when set, outbound links are scored and sorted by anchor + URL-path overlap with the query terms (content is not filtered — the model is in a better position to decide what's relevant once it has read the page)
+- **max_links**: Maximum outbound links returned (default 20, clamped to [1, 60])
+
+Returns JSON: `{"url", "content", "links": [{"url", "anchor", "same_domain", "relevance"?}, ...]}`.
+
+Recommended LLM-driven pattern:
+1. `web_search(query)` → seed URLs
+2. `fetch_with_links(url, query=query)` on a promising seed → text + scored outbound links
+3. The model picks the most useful link from `links` based on what it just read
+4. `fetch_with_links(next_url, query=query)` → repeat
+5. The model synthesises a report from accumulated content when it has enough
+
+The model decides depth, breadth, and stopping — no heuristic to fight.
+
+### `deep_research` — one-shot shortcut
 Iteratively search the web and follow links to gather scored, structured findings about a topic. Returns JSON with passages, source URLs, the link graph that produced them, and run statistics. **Long-running** (typically 30-180s). The calling LLM should synthesise the JSON into a written report — this tool intentionally does not write prose.
+
+Use this when round-trip token cost matters more than fine-grained control.  For exploratory research where the model wants to redirect mid-stream, prefer `fetch_with_links`.
 
 - **query** (required): The research question
 - **max_depth**: BFS depth from the seed search (default 2, clamped to [0, 4])
