@@ -37,10 +37,14 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --group dev
 
       - name: Compile-check
-        # Smoke-only: the test target is a stub (no tests checked in yet)
-        # and the real validation lives in the deploy job's build step.
         run: |
-          uv run python -m py_compile server.py config.py tools/search.py tools/fetch.py
+          uv run python -m py_compile \
+            server.py config.py \
+            tools/search.py tools/fetch.py \
+            tools/fetch_with_links.py tools/deep_research.py
+
+      - name: Unit tests
+        run: uv run pytest tests/ -v
