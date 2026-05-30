@@ -125,33 +125,166 @@ Queued jobs immediately started picking up.
 
 ## Outstanding verifications
 
-- [ ] **End-to-end deploy success.** The first deploy through the
-      newly-installed runner (`26668561478`, commit `25a468e`) built
-      fine but failed at the registry push step with:
-      ```
-      http: server gave HTTP response to HTTPS client
-      ```
-      Fix below. Until the deploy succeeds the live pod is still on
-      the *pre-rebase* image (7+ days old) — verify with:
-      ```bash
-      kubectl exec -n llmmllab "$(kubectl get pods -n llmmllab -l app=mcp-server-web -o jsonpath='{.items[0].metadata.name}')" \
-        -- ls /app/tools/
-      # Should show: deep_research.py  fetch.py  fetch_with_links.py  search.py
-      ```
+### 1. Confirm the new image is in the live pod
 
-- [ ] **Live MCP tool discovery.** After deploy succeeds, confirm
-      Claude Code / openclaw sees all four tools by name. Both
-      clients pick up tool-list changes on next session start —
-      no api restart needed on their side.
+```bash
+# Once the green-build deploy completes:
+POD=$(kubectl get pods -n llmmllab -l app=mcp-server-web -o jsonpath='{.items[0].metadata.name}')
+kubectl describe pod -n llmmllab "$POD" | grep -E 'Image:|Started'
+kubectl exec -n llmmllab "$POD" -- ls /app/tools/
+#   expected: deep_research.py  fetch.py  fetch_with_links.py  search.py
+```
 
-- [ ] **Deep-research smoke test.** Run a 2-3 turn `fetch_with_links`
-      chain against a real article. Verify content extraction looks
-      clean (no sidebar / popular-posts duplication) and that the
-      scored links surface useful follow-ups.
+### 2. Confirm tools are registered with the MCP server
 
-- [ ] **End-to-end `deep_research` run.** Default budget
-      (`max_depth=2`, `max_pages=30`, `max_seconds=180`) should
-      complete in 30-180s and return a structured JSON envelope.
+The simplest live discovery probe — JSON-RPC over the streamable
+HTTP transport. The server is on `mcp-server-web.llmmllab.svc.cluster.local:8000`
+inside the cluster; port-forward or exec to hit it from your laptop.
+
+```bash
+# From inside the cluster (any pod with curl):
+POD=$(kubectl get pods -n llmmllab -l app=mcp-server-web -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n llmmllab "$POD" -- sh -c '
+  curl -sS -X POST http://localhost:8000/mcp \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '"'"'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'"'"'
+' | python3 -c "import json,sys; d=json.load(sys.stdin); print('\n'.join(t['name'] for t in d['result']['tools']))"
+#   expected, in some order: web_search  fetch_page  fetch_with_links  deep_research
+```
+
+### 3. Smoke-test `fetch_with_links` end-to-end
+
+Call the tool directly via JSON-RPC, with a real (small) public
+article and a query, then eyeball the response shape:
+
+```bash
+POD=$(kubectl get pods -n llmmllab -l app=mcp-server-web -o jsonpath='{.items[0].metadata.name}')
+
+kubectl exec -n llmmllab "$POD" -- sh -c '
+  curl -sS -X POST http://localhost:8000/mcp \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '"'"'{
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "tools/call",
+      "params": {
+        "name": "fetch_with_links",
+        "arguments": {
+          "url": "https://en.wikipedia.org/wiki/Asyncio",
+          "query": "asyncio event loop coroutine",
+          "max_links": 8
+        }
+      }
+    }'"'"'
+' | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+payload = json.loads(d['result']['content'][0]['text'])
+print(f\"url:           {payload['url']}\")
+print(f\"content chars: {len(payload['content'])}\")
+print(f\"first 200:     {payload['content'][:200]!r}\")
+print(f\"links:\")
+for lk in payload['links'][:5]:
+    rel = lk.get('relevance', '-')
+    print(f\"  ({rel}) {lk['url']}\")
+    print(f\"        \\\"{lk['anchor'][:80]}\\\"\")
+"
+```
+
+Pass criteria:
+
+- `content` is a non-empty string with `\n\n` between paragraphs
+- No duplicated sidebar / "related-posts" blocks (visually scan the
+  first ~500 chars — if you see the article title or first
+  paragraph repeated, the boilerplate strip missed something)
+- `links` is a list of 5-8 entries, each with `url`, `anchor`,
+  `same_domain`, `relevance`
+- Sorted descending by `relevance`; the top link's anchor text
+  should plausibly relate to the query
+
+### 4. Smoke-test `deep_research` end-to-end
+
+Long-running call (~30-180s).  Run it with a tight budget first so
+you don't wait 3 minutes to see a failure:
+
+```bash
+POD=$(kubectl get pods -n llmmllab -l app=mcp-server-web -o jsonpath='{.items[0].metadata.name}')
+
+kubectl exec -n llmmllab "$POD" -- sh -c '
+  curl -sS --max-time 240 -X POST http://localhost:8000/mcp \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '"'"'{
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "tools/call",
+      "params": {
+        "name": "deep_research",
+        "arguments": {
+          "query": "how does Pythons asyncio event loop scheduler work",
+          "max_depth": 1,
+          "max_breadth": 4,
+          "max_pages": 8,
+          "max_seconds": 60,
+          "num_seeds": 5
+        }
+      }
+    }'"'"'
+' | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+payload = json.loads(d['result']['content'][0]['text'])
+print(f\"query:         {payload['query']}\")
+print(f\"stats:         {payload['stats']}\")
+print(f\"seed_results:  {len(payload['seed_results'])} URLs\")
+print(f\"sources kept:  {len(payload['sources'])}\")
+print(f\"passages kept: {len(payload['passages'])}\")
+if payload['fetch_errors']:
+    print(f\"fetch errors:  {len(payload['fetch_errors'])}\")
+print()
+print('Top 3 passages:')
+for p in payload['passages'][:3]:
+    print(f\"  [rel={p['relevance']} depth={p['depth']}] {p['source_url']}\")
+    print(f\"    {p['text'][:200]!r}\")
+"
+```
+
+Pass criteria:
+
+- `stats.stopped_reason` is one of `frontier_empty`, `depth_reached`,
+  `page_budget`, `time_budget` (the run terminated cleanly)
+- `stats.pages_fetched` is 1-8 (within budget)
+- `passages` is a non-empty list of `{text, source_url, depth, relevance}`
+  dicts, sorted by `relevance` desc
+- No duplicate passages across `source_url`s — the shingle dedup
+  should catch obvious copy-paste between sources
+
+Failure cases worth flagging:
+
+- `stats.stopped_reason == "no_seeds"` → SearxNG is unreachable
+  from inside the pod. Check `SEARX_HOST` and the searxng pod's
+  status.
+- All `fetch_errors`, zero passages → either every seed returned
+  non-HTML content or every page failed to fetch. Inspect
+  `fetch_errors[*].reason`.
+- Run hangs past `max_seconds` → there's an `asyncio.wait_for` at
+  twice that budget as a hard guard. If the outer timeout fires,
+  the tool returns a JSON envelope with
+  `stats.stopped_reason == "hard_timeout"`.
+
+### 5. Live MCP tool discovery via Claude Code / openclaw
+
+Both clients pick up tool-list changes on next session start. No
+api restart needed on their side. Open a fresh session and ask:
+
+> Use the `deep_research` tool to write a one-paragraph summary of
+> how Python's asyncio event loop scheduler works. Use `max_depth=1`,
+> `max_pages=8`, `max_seconds=60`.
+
+The model should fire the tool, wait ~30-60s, then synthesise the
+JSON into prose. Verify it cites at least 2 source URLs.
 
 ## To do / next steps
 
