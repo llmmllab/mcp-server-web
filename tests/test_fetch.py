@@ -2,7 +2,7 @@
 
 import pytest
 import respx
-import aiohttp
+import httpx
 
 from tools.fetch import fetch_page, _analyze_html, _truncate
 from config import MAX_CONTENT_LENGTH, SPA_TEXT_THRESHOLD, SPA_SCRIPT_RATIO
@@ -10,7 +10,15 @@ from config import MAX_CONTENT_LENGTH, SPA_TEXT_THRESHOLD, SPA_SCRIPT_RATIO
 
 class TestAnalyzeHtml:
     def test_basic_text_extraction(self):
-        html = "<html><body><p>Hello world</p></body></html>"
+        # The paragraph must clear ``SPA_TEXT_THRESHOLD`` (default 50)
+        # so the page isn't classified as SPA on the visible-text
+        # signal — a tiny "Hello world" page legitimately looks like
+        # an empty-shell SPA to the heuristic.
+        html = (
+            "<html><body><p>Hello world from a regular static page with "
+            "more than enough body text to clear the SPA-detection "
+            "threshold easily.</p></body></html>"
+        )
         text, is_spa = _analyze_html(html)
         assert "Hello world" in text
         assert is_spa is False
@@ -94,7 +102,7 @@ class TestFetchPage:
     async def test_fetch_html_page(self):
         html = "<html><body><h1>Title</h1><p>Page content here</p></body></html>"
         respx.get("https://example.com/page").mock(
-            return_value=aiohttp.Response(text=html, headers={"content-type": "text/html"})
+            return_value=httpx.Response(200, text=html, headers={"content-type": "text/html"})
         )
 
         result = await fetch_page("https://example.com/page")
@@ -106,7 +114,7 @@ class TestFetchPage:
     @pytest.mark.asyncio
     async def test_fetch_plain_text(self):
         respx.get("https://example.com/readme.txt").mock(
-            return_value=aiohttp.Response(text="plain text content", headers={"content-type": "text/plain"})
+            return_value=httpx.Response(200, text="plain text content", headers={"content-type": "text/plain"})
         )
 
         result = await fetch_page("https://example.com/readme.txt")
@@ -117,7 +125,7 @@ class TestFetchPage:
     @pytest.mark.asyncio
     async def test_fetch_json(self):
         respx.get("https://example.com/data.json").mock(
-            return_value=aiohttp.Response(text='{"key": "value"}', headers={"content-type": "application/json"})
+            return_value=httpx.Response(200, text='{"key": "value"}', headers={"content-type": "application/json"})
         )
 
         result = await fetch_page("https://example.com/data.json")
@@ -127,7 +135,7 @@ class TestFetchPage:
     @respx.mock
     @pytest.mark.asyncio
     async def test_http_error_status(self):
-        respx.get("https://example.com/404").mock(return_value=aiohttp.Response(status=404))
+        respx.get("https://example.com/404").mock(return_value=httpx.Response(404))
 
         result = await fetch_page("https://example.com/404")
         assert "HTTP 404" in result
@@ -136,7 +144,7 @@ class TestFetchPage:
     @pytest.mark.asyncio
     async def test_binary_content_error(self):
         respx.get("https://example.com/image.png").mock(
-            return_value=aiohttp.Response(text="binary", headers={"content-type": "image/png"})
+            return_value=httpx.Response(200, text="binary", headers={"content-type": "image/png"})
         )
 
         result = await fetch_page("https://example.com/image.png")
@@ -146,7 +154,7 @@ class TestFetchPage:
     @respx.mock
     @pytest.mark.asyncio
     async def test_network_error(self):
-        respx.get("https://nonexistent.example.com/").mock(side_effect=aiohttp.ClientError())
+        respx.get("https://nonexistent.example.com/").mock(side_effect=httpx.ConnectError("connection refused"))
 
         result = await fetch_page("https://nonexistent.example.com/")
         assert "Error" in result
@@ -157,7 +165,7 @@ class TestFetchPage:
     async def test_truncation_applied(self):
         long_html = "<html><body>" + "<p>" + "x" * (MAX_CONTENT_LENGTH + 500) + "</p></body></html>"
         respx.get("https://example.com/long").mock(
-            return_value=aiohttp.Response(text=long_html, headers={"content-type": "text/html"})
+            return_value=httpx.Response(200, text=long_html, headers={"content-type": "text/html"})
         )
 
         result = await fetch_page("https://example.com/long")

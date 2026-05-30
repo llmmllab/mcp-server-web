@@ -6,7 +6,7 @@ import json
 import pytest
 
 import respx
-import aiohttp
+import httpx
 
 from config import SEARX_HOST
 
@@ -98,7 +98,7 @@ async def test_web_search_returns_results_via_server():
             {"title": "Test Result", "url": "https://example.com/", "content": "snippet"}
         ]
     }
-    respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json=mock_data))
+    respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json=mock_data))
 
     mcp = FastMCP("test")
     mcp.tool(
@@ -146,7 +146,7 @@ async def test_fetch_page_returns_content_via_server():
 
     html = "<html><body><h1>Hello</h1><p>World</p></body></html>"
     respx.get("https://example.com/").mock(
-        return_value=aiohttp.Response(text=html, headers={"content-type": "text/html"})
+        return_value=httpx.Response(200, text=html, headers={"content-type": "text/html"})
     )
 
     mcp = FastMCP("test")

@@ -20,7 +20,7 @@ import json
 import logging
 from typing import Literal
 
-import aiohttp
+import httpx
 
 from config import (
     SEARX_HOST,
@@ -154,16 +154,15 @@ async def searx_query(
         params["time_range"] = tr
 
     async def _do_request() -> dict:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+            response = await client.get(
                 f"{SEARX_HOST}/search",
                 params=params,
                 headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status >= 400:
-                    return {"_error": f"SearxNG returned HTTP {response.status}"}
-                return await response.json()
+            )
+            if response.status_code >= 400:
+                return {"_error": f"SearxNG returned HTTP {response.status_code}"}
+            return response.json()
 
     try:
         data = await asyncio.wait_for(_do_request(), timeout=SEARCH_HARD_TIMEOUT)
@@ -172,17 +171,17 @@ async def searx_query(
             "searx_query timed out after %ss", SEARCH_HARD_TIMEOUT,
             extra={"query": query},
         )
-        return []
-    except aiohttp.ClientError as e:
+        raise SearxError(f"Search timed out after {SEARCH_HARD_TIMEOUT}s") from None
+    except httpx.RequestError as e:
         logger.warning("searx_query network error: %s", e, extra={"query": query})
-        return []
+        raise SearxError(f"Network error: {e}") from e
     except Exception as e:  # pragma: no cover — defensive
         logger.error("searx_query failed: %s", e, extra={"query": query})
-        return []
+        raise SearxError(f"Search failed: {e}") from e
 
     if "_error" in data:
         logger.warning("searx_query upstream error: %s", data["_error"])
-        return []
+        raise SearxError(str(data["_error"]))
 
     contents: list[dict] = []
     for i, r in enumerate((data.get("results") or [])[:max_results]):

@@ -40,11 +40,9 @@ import re
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-import aiohttp
 from bs4 import BeautifulSoup
 
 from config import FETCH_HARD_TIMEOUT, MAX_CONTENT_LENGTH
-from server import mcp
 from tools.fetch import (
     _analyze_html,
     fetch_html,
@@ -212,17 +210,17 @@ def _extract_outbound_links(
     return candidates
 
 
-@mcp.tool(
-    name="fetch_with_links",
-    description=(
-        "Fetch a web page and return BOTH its cleaned text AND its outbound "
-        "links (with anchor text and optional relevance score against a "
-        "query).  The intended pattern is turn-by-turn LLM-driven research: "
-        "fetch a page, decide which link to follow next based on what you "
-        "just read, fetch that, repeat.  Pass ``query`` to score links by "
-        "relevance; omit it for raw link-graph output."
-    ),
+# Description used by server.py when registering this function with FastMCP.
+FETCH_WITH_LINKS_DESCRIPTION = (
+    "Fetch a web page and return BOTH its cleaned text AND its outbound "
+    "links (with anchor text and optional relevance score against a "
+    "query).  The intended pattern is turn-by-turn LLM-driven research: "
+    "fetch a page, decide which link to follow next based on what you "
+    "just read, fetch that, repeat.  Pass ``query`` to score links by "
+    "relevance; omit it for raw link-graph output."
 )
+
+
 async def fetch_with_links(
     url: str,
     query: Optional[str] = None,

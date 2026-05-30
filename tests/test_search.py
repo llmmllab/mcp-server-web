@@ -4,7 +4,7 @@ import json
 
 import pytest
 import respx
-import aiohttp
+import httpx
 
 from tools.search import web_search, _envelope
 from config import SEARX_HOST, SEARCH_HARD_TIMEOUT
@@ -24,10 +24,14 @@ class TestEnvelope:
         assert data["error"] == "Something broke"
         assert data["results"] == []
 
-    def test_results_and_contents_are_same_ref(self):
+    def test_results_and_contents_are_equal(self):
+        """``results`` and ``contents`` are envelope aliases — compare
+        equal after a JSON round-trip.  Identity (``is``) can't survive
+        ``json.dumps`` + ``json.loads`` since JSON has no concept of
+        shared references."""
         items = [{"title": "X"}]
         data = json.loads(_envelope("q", items))
-        assert data["results"] is data["contents"]
+        assert data["results"] == data["contents"]
 
 
 class TestWebSearch:
@@ -61,7 +65,7 @@ class TestWebSearch:
                 },
             ]
         }
-        route = respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json=mock_data))
+        route = respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json=mock_data))
 
         result = await web_search("python testing")
         assert route.called
@@ -82,7 +86,7 @@ class TestWebSearch:
                 {"title": "Blocked", "url": "https://example.com/robots.txt", "content": "no"},
             ]
         }
-        respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json=mock_data))
+        respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json=mock_data))
 
         result = await web_search("test")
         data = json.loads(result)
@@ -98,7 +102,7 @@ class TestWebSearch:
                 {"title": "Good", "url": "https://example.com/", "content": "ok"},
             ]
         }
-        respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json=mock_data))
+        respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json=mock_data))
 
         result = await web_search("test")
         data = json.loads(result)
@@ -107,7 +111,7 @@ class TestWebSearch:
     @respx.mock
     @pytest.mark.asyncio
     async def test_http_error_returns_structured_error(self):
-        respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(status=500))
+        respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(500))
 
         result = await web_search("test")
         data = json.loads(result)
@@ -123,7 +127,7 @@ class TestWebSearch:
                 for i in range(5)
             ]
         }
-        respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json=mock_data))
+        respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json=mock_data))
 
         result = await web_search("test", num_results=2)
         data = json.loads(result)
@@ -132,7 +136,7 @@ class TestWebSearch:
     @respx.mock
     @pytest.mark.asyncio
     async def test_custom_engines_and_categories(self):
-        route = respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json={"results": []}))
+        route = respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json={"results": []}))
 
         await web_search("test", engines=["google"], categories=["news"])
         assert route.called
@@ -143,7 +147,7 @@ class TestWebSearch:
     @respx.mock
     @pytest.mark.asyncio
     async def test_custom_time_range(self):
-        route = respx.get(f"{SEARX_HOST}/search").mock(return_value=aiohttp.Response(json={"results": []}))
+        route = respx.get(f"{SEARX_HOST}/search").mock(return_value=httpx.Response(200, json={"results": []}))
 
         await web_search("test", time_range="week")
         params = dict(route.calls[0].request.url.params)
@@ -152,7 +156,7 @@ class TestWebSearch:
     @respx.mock
     @pytest.mark.asyncio
     async def test_network_error_returns_envelope(self):
-        respx.get(f"{SEARX_HOST}/search").mock(side_effect=aiohttp.ClientError())
+        respx.get(f"{SEARX_HOST}/search").mock(side_effect=httpx.ConnectError("connection refused"))
 
         result = await web_search("test")
         data = json.loads(result)

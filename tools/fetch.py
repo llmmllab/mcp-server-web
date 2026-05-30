@@ -2,9 +2,14 @@
 Web content fetching tool using BeautifulSoup and Playwright.
 
 Fetches and extracts readable text content from web pages, including:
-- Static HTML pages via aiohttp + BeautifulSoup
+- Static HTML pages via httpx + BeautifulSoup
 - Plain text and markdown files
 - Single Page Applications (SPA) via Playwright rendering
+
+This module migrated from aiohttp to httpx (2026-05-29) so the test
+suite can mock HTTP via respx — the dev dep ``respx`` only intercepts
+httpx, not aiohttp.  The api repo also uses httpx so this aligns the
+HTTP-client surface across both codebases.
 """
 
 import asyncio
@@ -13,7 +18,7 @@ import logging
 import re
 from typing import Optional, Tuple
 
-import aiohttp
+import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
@@ -247,45 +252,44 @@ async def _process_html(url: str, html_content: str, allow_spa_fallback: bool) -
 async def fetch_html(
     url: str,
     *,
-    session: Optional[aiohttp.ClientSession] = None,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> Optional[str]:
     """Fetch raw HTML for ``url`` and return the body, or None on error.
 
     Reusable building block shared by :func:`fetch_page` (the MCP tool)
     and :func:`tools.deep_research.deep_research` (which needs raw HTML
     for link extraction, not the cleaned text).  Always returns within
-    ``REQUEST_TIMEOUT`` seconds — the outer ``asyncio.wait_for`` in the
-    MCP tool adds another layer on top.
+    ``REQUEST_TIMEOUT`` seconds.
 
-    Pass an ``aiohttp.ClientSession`` to share connection pooling
-    across many fetches (the deep-research BFS does this).  Without
-    one, a per-call session is created and closed.
+    Pass an ``httpx.AsyncClient`` to share connection pooling across
+    many fetches (the deep-research BFS does this).  Without one, a
+    per-call client is created and closed.
     """
-    owns_session = session is None
-    if owns_session:
-        session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(REQUEST_TIMEOUT),
+            follow_redirects=True,
+            headers=BROWSER_HEADERS,
         )
-    assert session is not None
+    assert client is not None
     try:
-        async with session.get(
-            url, headers=BROWSER_HEADERS, allow_redirects=True
-        ) as response:
-            if response.status >= 400:
-                return None
-            content_type = (response.headers.get("content-type") or "").lower()
-            if "text/html" not in content_type and "application/xhtml" not in content_type:
-                return None
-            return await response.text()
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        response = await client.get(url, headers=BROWSER_HEADERS)
+        if response.status_code >= 400:
+            return None
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "text/html" not in content_type and "application/xhtml" not in content_type:
+            return None
+        return response.text
+    except (httpx.RequestError, asyncio.TimeoutError) as e:
         logger.debug("fetch_html failed for %s: %s", url, e)
         return None
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("fetch_html unexpected error for %s: %s", url, e)
         return None
     finally:
-        if owns_session:
-            await session.close()
+        if owns_client:
+            await client.aclose()
 
 
 async def _fetch_impl(url: str, render_js: bool) -> str:
@@ -296,28 +300,27 @@ async def _fetch_impl(url: str, render_js: bool) -> str:
             return "Error: Playwright rendering failed or not installed."
         return await _process_html(url, rendered, allow_spa_fallback=False)
 
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-    ) as session:
-        async with session.get(
-            url, headers=BROWSER_HEADERS, allow_redirects=True
-        ) as response:
-            if response.status >= 400:
-                return f"Error: HTTP {response.status} when accessing {url}"
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(REQUEST_TIMEOUT),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(url, headers=BROWSER_HEADERS)
+        if response.status_code >= 400:
+            return f"Error: HTTP {response.status_code} when accessing {url}"
 
-            content_type = response.headers.get("content-type", "").lower()
-            body = await response.text()
+        content_type = (response.headers.get("content-type") or "").lower()
+        body = response.text
 
-            if "text/html" in content_type:
-                return await _process_html(url, body, allow_spa_fallback=True)
+        if "text/html" in content_type:
+            return await _process_html(url, body, allow_spa_fallback=True)
 
-            if "application/json" in content_type or "text/" in content_type:
-                return f"Content from {url}:\n\n{_truncate(body)}"
+        if "application/json" in content_type or "text/" in content_type:
+            return f"Content from {url}:\n\n{_truncate(body)}"
 
-            return (
-                f"Error: URL does not appear to contain readable text "
-                f"(content-type: {content_type})"
-            )
+        return (
+            f"Error: URL does not appear to contain readable text "
+            f"(content-type: {content_type})"
+        )
 
 
 async def fetch_page(url: str, render_js: bool = False) -> str:
@@ -329,14 +332,14 @@ async def fetch_page(url: str, render_js: bool = False) -> str:
     fall back to Playwright rendering.
 
     Reliability: a hard ``asyncio.wait_for`` wraps the entire fetch
-    (``FETCH_HARD_TIMEOUT`` seconds, default 75) on top of aiohttp's
-    internal ClientTimeout — aiohttp can hang on some DNS/TLS failure
-    modes and Playwright can spin past its 30s timeout while waiting on
+    (``FETCH_HARD_TIMEOUT`` seconds, default 75) on top of httpx's
+    internal timeout — httpx can hang on some DNS/TLS failure modes
+    and Playwright can spin past its 30s timeout while waiting on
     selectors.  The outer wait_for guarantees a return.
 
     Args:
         url: The URL to read content from (must be http:// or https://).
-        render_js: If True, skip aiohttp and render with Playwright directly.
+        render_js: If True, skip httpx and render with Playwright directly.
 
     Returns:
         Clean text content from the web page, or error message if fetch fails.
@@ -368,7 +371,7 @@ async def fetch_page(url: str, render_js: bool = False) -> str:
         )
         logger.warning(msg, extra={"url": url})
         return msg
-    except aiohttp.ClientError as e:
+    except httpx.RequestError as e:
         msg = f"Error: Network error when accessing {url}: {str(e)}"
         logger.warning(msg, extra={"url": url})
         return msg

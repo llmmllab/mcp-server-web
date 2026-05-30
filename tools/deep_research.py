@@ -54,10 +54,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-import aiohttp
+import httpx
 from bs4 import BeautifulSoup
 
-from server import mcp
 from tools.fetch import (
     _BLOCK_TAGS,
     _BOILERPLATE_CLASS_RE,
@@ -65,7 +64,7 @@ from tools.fetch import (
     _strip_boilerplate,
     fetch_html,
 )
-from tools.search import searx_query
+from tools.search import SearxError, searx_query
 
 logger = logging.getLogger("mcp-server-web.deep_research")
 
@@ -463,12 +462,18 @@ async def _do_research(
 
     fetch_sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
 
-    async with aiohttp.ClientSession() as session:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30), follow_redirects=True
+    ) as session:
         # --- Round 0: search seeds --------------------------------
         # Reuse the same SearxNG call path as the ``web_search`` tool
         # (tools/search.py::searx_query) — same timeout / blocklist /
         # filter logic, no duplication.
-        raw_seeds = await searx_query(query, num_results=num_seeds)
+        try:
+            raw_seeds = await searx_query(query, num_results=num_seeds)
+        except SearxError as e:
+            logger.warning("deep_research: seed search failed: %s", e)
+            raw_seeds = []
         seeds: list[dict] = []
         for r in raw_seeds:
             url = r.get("url") or ""
@@ -517,7 +522,7 @@ async def _do_research(
                 # tool (tools/fetch.py::fetch_html).  Deep research
                 # skips the Playwright fallback path for budget reasons
                 # — too slow across dozens of pages.
-                html = await fetch_html(cand.url, session=session)
+                html = await fetch_html(cand.url, client=session)
             if html is None:
                 state.fetch_errors.append(
                     {"url": cand.url, "depth": cand.depth, "reason": "fetch_failed"}
@@ -579,21 +584,26 @@ async def _do_research(
 
 
 # ---------------------------------------------------------------------------
-# Tool registration
+# Tool registration: this module exports ``deep_research`` as a plain
+# coroutine.  ``server.py`` registers it with FastMCP via
+# ``mcp.tool(name=..., description=...)(deep_research)`` — same explicit
+# pattern as the other tools, so all four register at the same place.
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
-    name="deep_research",
-    description=(
-        "Iteratively search the web and follow links to gather scored, "
-        "structured findings about a topic.  Returns JSON with passages, "
-        "their source URLs, the link graph that found them, and run "
-        "statistics.  Long-running (typically 30-180s).  The calling LLM "
-        "should synthesise the JSON into a written report — this tool "
-        "intentionally does not write prose."
-    ),
+# Description used by server.py when registering this function with
+# FastMCP.  Kept as a module-level constant so server.py can read it
+# without having to maintain two copies of the wording.
+DEEP_RESEARCH_DESCRIPTION = (
+    "Iteratively search the web and follow links to gather scored, "
+    "structured findings about a topic.  Returns JSON with passages, "
+    "their source URLs, the link graph that found them, and run "
+    "statistics.  Long-running (typically 30-180s).  The calling LLM "
+    "should synthesise the JSON into a written report — this tool "
+    "intentionally does not write prose."
 )
+
+
 async def deep_research(
     query: str,
     max_depth: int = _DEFAULT_MAX_DEPTH,
