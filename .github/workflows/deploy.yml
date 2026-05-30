@@ -23,14 +23,23 @@ jobs:
 
           echo "Building ${IMAGE} (SHA: $SHORT_SHA)..."
 
-          # Multi-arch build — k8s/deployment.yaml pins
-          # kubernetes.io/arch=arm64, but the registry serves both.
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+          # k8s/deployment.yaml pins ``kubernetes.io/arch: arm64`` so
+          # the cluster only ever pulls arm64.  Build that arch via
+          # the ``multibuilder`` buildx builder (the api repo uses the
+          # same one — pre-configured on lsnode-3 with QEMU emulation
+          # and the insecure-registry flag) and ``--load`` the result
+          # into the local docker daemon.  Then plain ``docker push``
+          # — buildx's direct push defaults to HTTPS and fails against
+          # our HTTP cluster registry, but the daemon honours the
+          # ``insecure-registries`` config in /etc/docker/daemon.json.
+          docker buildx build --builder multibuilder \
+            --platform linux/arm64 \
             -t ${REGISTRY}/${IMAGE}:${SHA} \
-            -t ${REGISTRY}/${IMAGE}:latest \
-            --push \
-            .
+            --load .
+
+          docker push ${REGISTRY}/${IMAGE}:${SHA}
+          docker tag ${REGISTRY}/${IMAGE}:${SHA} ${REGISTRY}/${IMAGE}:latest
+          docker push ${REGISTRY}/${IMAGE}:latest
 
           # Apply manifests and roll the deployment so the new :latest is
           # actually pulled by the kubelet on the next pod start.
