@@ -41,7 +41,7 @@ spec:
             - name: SEARX_MAX_RESULTS
               value: "10"
             - name: MAX_CONTENT_LENGTH
-              value: "8000"
+              value: "20000"
             - name: REQUEST_TIMEOUT
               value: "30"
           resources:
