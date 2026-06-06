@@ -28,7 +28,10 @@ SEARX_SAFESEARCH = int(os.environ.get("SEARX_SAFESEARCH", "1"))
 SEARX_TIME_RANGE = os.environ.get("SEARX_TIME_RANGE", "")
 
 # Web reader configuration
-MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", "8000"))
+# 20000 chars (~5k tokens) per fetched page — enough for the researcher agent
+# to read substantial sources in a turn-based loop without choking a small
+# model's working context. Env-overridable. (Was 8000.)
+MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", "20000"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 SPA_TEXT_THRESHOLD = int(os.environ.get("SPA_TEXT_THRESHOLD", "50"))
 SPA_SCRIPT_RATIO = float(os.environ.get("SPA_SCRIPT_RATIO", "0.5"))
