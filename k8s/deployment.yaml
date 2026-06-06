@@ -19,10 +19,22 @@ spec:
         - name: mcp-server-web
           image: 192.168.0.71:31500/mcp-server-web:latest
           imagePullPolicy: Always
+          # Run the baked system install directly. NOT `uv run` — that re-syncs
+          # a fresh .venv at start (re-downloading playwright etc.) and the slow
+          # install blows past the liveness window → crashloop (exit 137).
+          command: ["python", "server.py"]
           ports:
             - name: http
               containerPort: 8000
               protocol: TCP
+          # startupProbe guards a slow first boot: liveness/readiness do not run
+          # until the port is open (up to 30×5s = 150s grace) so a cold start is
+          # never SIGKILLed mid-startup.
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             tcpSocket:
               port: http

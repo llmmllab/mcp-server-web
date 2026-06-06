@@ -59,4 +59,8 @@ USER mcp
 # Expose port for streaming HTTP transport
 EXPOSE 8000
 
-CMD ["uv", "run", "python", "server.py"]
+# Run the baked system install directly. NOT `uv run` — that creates/syncs a
+# fresh project .venv at container start (re-downloading playwright etc.),
+# ignoring the build-time `uv pip install --system .` above. That runtime sync
+# blows past the liveness window and crashloops the pod (exit 137).
+CMD ["python", "server.py"]
