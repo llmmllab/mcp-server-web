@@ -26,7 +26,7 @@ class TestConfigDefaults:
         assert config.SEARX_LANGUAGE == "en"
         assert config.SEARX_SAFESEARCH == 1
         assert config.SEARX_TIME_RANGE == ""
-        assert config.MAX_CONTENT_LENGTH == 8000
+        assert config.MAX_CONTENT_LENGTH == 20000
         assert config.REQUEST_TIMEOUT == 30
         assert config.SPA_TEXT_THRESHOLD == 50
         assert config.SPA_SCRIPT_RATIO == 0.5
