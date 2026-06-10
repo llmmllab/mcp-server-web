@@ -11,6 +11,7 @@ from tools.fetch_with_links import (
     _rank_links,
     fetch_with_links,
 )
+from tools._content_cache import content_cache
 
 
 class TestExtractOutboundLinks:
@@ -234,3 +235,72 @@ class TestFetchWithLinks:
         # Links served from cache on page 2 — identical, and only one fetch.
         assert p2["links"] == p1["links"]
         assert m.await_count == 1
+
+    _EMBED_HTML = (
+        "<html><body><article><p>Body text long enough to extract.</p>"
+        "<a href='https://e.com/alpha-topic'>Alpha topic deep dive</a>"
+        "<a href='https://e.com/beta-thing'>Beta thing overview</a>"
+        "</article></body></html>"
+    )
+
+    async def _fake_embed(self, texts, **kwargs):
+        # "alpha" -> [1,0]; everything else -> [0,1].
+        return [[1.0, 0.0] if "alpha" in t.lower() else [0.0, 1.0] for t in texts]
+
+    async def test_auto_uses_embeddings_when_configured(self, monkeypatch):
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_ENDPOINT", "http://emb/v1")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_MODEL", "m")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_API_KEY", "")
+        with patch("tools.fetch_with_links.fetch_html", new=AsyncMock(return_value=self._EMBED_HTML)), \
+             patch("tools.fetch_with_links.embed_texts", new=AsyncMock(side_effect=self._fake_embed)):
+            res = json.loads(await fetch_with_links("https://src.com/p", query="alpha"))
+        assert res["link_ranking"] == "embedding"
+        assert res["links"][0]["url"] == "https://e.com/alpha-topic"
+        assert res["links"][0]["relevance"] > res["links"][1]["relevance"]
+
+    async def test_rank_links_by_lexical_forces_lexical(self, monkeypatch):
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_ENDPOINT", "http://emb/v1")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_MODEL", "m")
+        embed = AsyncMock(side_effect=self._fake_embed)
+        with patch("tools.fetch_with_links.fetch_html", new=AsyncMock(return_value=self._EMBED_HTML)), \
+             patch("tools.fetch_with_links.embed_texts", new=embed):
+            res = json.loads(
+                await fetch_with_links("https://src.com/p", query="alpha", rank_links_by="lexical")
+            )
+        assert res["link_ranking"] == "lexical"
+        embed.assert_not_called()
+
+    async def test_embedding_failure_falls_back_to_lexical(self, monkeypatch):
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_ENDPOINT", "http://emb/v1")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_MODEL", "m")
+        with patch("tools.fetch_with_links.fetch_html", new=AsyncMock(return_value=self._EMBED_HTML)), \
+             patch("tools.fetch_with_links.embed_texts", new=AsyncMock(return_value=None)):
+            res = json.loads(await fetch_with_links("https://src.com/p", query="alpha"))
+        assert res["link_ranking"] == "lexical"
+
+    async def test_per_call_endpoint_does_not_leak_config_key(self, monkeypatch):
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_ENDPOINT", "")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_MODEL", "")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_API_KEY", "CONFIG-SECRET")
+        embed = AsyncMock(side_effect=self._fake_embed)
+        with patch("tools.fetch_with_links.fetch_html", new=AsyncMock(return_value=self._EMBED_HTML)), \
+             patch("tools.fetch_with_links.embed_texts", new=embed):
+            await fetch_with_links(
+                "https://src.com/p", query="alpha",
+                embedding_endpoint="http://other/v1", embedding_model="m",
+            )
+        # Config key must never be sent to a caller-supplied endpoint.
+        for call in embed.await_args_list:
+            assert call.kwargs["api_key"] != "CONFIG-SECRET"
+            assert call.kwargs["api_key"] == ""
+
+    async def test_candidate_embeddings_cached_across_calls(self, monkeypatch):
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_ENDPOINT", "http://emb/v1")
+        monkeypatch.setattr("tools.fetch_with_links.EMBEDDING_MODEL", "m")
+        embed = AsyncMock(side_effect=self._fake_embed)
+        with patch("tools.fetch_with_links.fetch_html", new=AsyncMock(return_value=self._EMBED_HTML)), \
+             patch("tools.fetch_with_links.embed_texts", new=embed):
+            await fetch_with_links("https://src.com/p", query="alpha")  # candidates(1) + query(1)
+            await fetch_with_links("https://src.com/p", query="alpha")  # query(1), candidates cached
+        # 2 + 1 == 3 calls; a 4th would mean candidates were re-embedded.
+        assert embed.await_count == 3

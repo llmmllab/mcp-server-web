@@ -42,8 +42,16 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from config import FETCH_HARD_TIMEOUT, MAX_CONTENT_LENGTH
+from config import (
+    EMBEDDING_API_KEY,
+    EMBEDDING_ENDPOINT,
+    EMBEDDING_MODEL,
+    EMBEDDING_TIMEOUT,
+    FETCH_HARD_TIMEOUT,
+    MAX_CONTENT_LENGTH,
+)
 from tools._content_cache import content_cache
+from tools._embeddings import cosine, embed_texts
 from tools._pagination import window_text
 from tools.fetch import (
     _analyze_html,
@@ -185,6 +193,69 @@ def _collect_link_candidates(html: str, page_url: str) -> list[dict]:
     return candidates
 
 
+def _humanize_path(u: str) -> str:
+    """URL path with separators turned into spaces — extra signal for embedding."""
+    return urlparse(u).path.replace("-", " ").replace("_", " ")
+
+
+def _rank_links_semantic(
+    candidates: list[dict],
+    query_vec: list[float],
+    cand_vecs: list[list[float]],
+) -> list[dict]:
+    """Rank candidates by cosine(query, candidate) with the same-domain penalty.
+
+    Same output shape as ``_rank_links`` (a ``relevance`` float per link) so the
+    response JSON is identical regardless of which ranker ran.
+    """
+    ranked: list[dict] = []
+    for c, v in zip(candidates, cand_vecs):
+        score = cosine(query_vec, v)
+        if c["same_domain"]:
+            score *= 0.7
+        ranked.append({**c, "relevance": round(score, 4)})
+    ranked.sort(key=lambda e: e.get("relevance", 0.0), reverse=True)
+    return ranked
+
+
+async def _rank_links_with_embeddings(
+    candidates: list[dict],
+    query: str,
+    *,
+    endpoint: str,
+    model: str,
+    api_key: str,
+    cache_value: dict,
+) -> Optional[list[dict]]:
+    """Semantically rank ``candidates``; return ``None`` to signal lexical fallback.
+
+    Candidate vectors are cached per model in ``cache_value['embeddings_by_model']``
+    (mutated in place) so paginating the same URL does not re-embed the links.
+    The query vector is embedded fresh each call (1 input, negligible).
+    """
+    cand_texts = [f"{c['anchor']} — {_humanize_path(c['url'])}" for c in candidates]
+
+    cached_vecs = cache_value["embeddings_by_model"].get(model)
+    if cached_vecs is not None and len(cached_vecs) == len(candidates):
+        cand_vecs = cached_vecs
+    else:
+        cand_vecs = await embed_texts(
+            cand_texts, endpoint=endpoint, model=model, api_key=api_key,
+            timeout=EMBEDDING_TIMEOUT,
+        )
+        if cand_vecs is None:
+            return None
+        cache_value["embeddings_by_model"][model] = cand_vecs
+
+    query_vecs = await embed_texts(
+        [query], endpoint=endpoint, model=model, api_key=api_key,
+        timeout=EMBEDDING_TIMEOUT,
+    )
+    if not query_vecs:
+        return None
+    return _rank_links_semantic(candidates, query_vecs[0], cand_vecs)
+
+
 def _rank_links(candidates: list[dict], query: Optional[str]) -> list[dict]:
     """Lexical ranking (anchor + URL-path term overlap).
 
@@ -233,6 +304,10 @@ async def fetch_with_links(
     max_links: int = _DEFAULT_MAX_LINKS,
     offset: int = 0,
     limit: Optional[int] = None,
+    rank_links_by: str = "auto",
+    embedding_endpoint: Optional[str] = None,
+    embedding_model: Optional[str] = None,
+    embedding_api_key: Optional[str] = None,
 ) -> str:
     """Fetch ``url`` and return windowed text content + outbound links as JSON.
 
@@ -302,8 +377,34 @@ async def fetch_with_links(
     content_full = cached["content"]
     candidates = cached["link_candidates"]
 
-    ranked = _rank_links(candidates, query)
+    # Resolve embedding settings (hybrid: per-call overrides config). Key-leak
+    # guard: a per-call endpoint override never receives the config API key.
+    endpoint = embedding_endpoint or EMBEDDING_ENDPOINT
+    model = embedding_model or EMBEDDING_MODEL
+    if embedding_endpoint:
+        api_key = embedding_api_key or ""
+    else:
+        api_key = embedding_api_key or EMBEDDING_API_KEY
+
+    use_embedding = (
+        rank_links_by != "lexical"
+        and bool(query)
+        and bool(endpoint)
+        and bool(model)
+        and bool(candidates)
+    )
+
+    ranked = None
     link_ranking = "lexical"
+    if use_embedding and query is not None:
+        semantic = await _rank_links_with_embeddings(
+            candidates, query, endpoint=endpoint, model=model,
+            api_key=api_key, cache_value=cached,
+        )
+        if semantic is not None:
+            ranked, link_ranking = semantic, "embedding"
+    if ranked is None:
+        ranked = _rank_links(candidates, query)
     links = ranked[:max_links]
 
     win = window_text(content_full, offset, limit if limit is not None else MAX_CONTENT_LENGTH)
