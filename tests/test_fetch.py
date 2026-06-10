@@ -65,6 +65,26 @@ class TestAnalyzeHtml:
         assert text == ""
         assert is_spa is True  # empty text is below threshold
 
+    def test_does_not_strip_document_root_on_feature_flag_class(self):
+        # Regression (Wikipedia/MediaWiki Vector skin): feature-flag classes
+        # like "vector-feature-language-in-header-enabled" live on <html>, and
+        # the boilerplate word-regex matches "header" inside that compound
+        # token. _strip_boilerplate used to decompose the entire <html> root,
+        # wiping all content (a 205KB Wikipedia page extracted to 0 chars).
+        # The document root is never boilerplate.
+        html = (
+            '<html class="vector-feature-language-in-header-enabled client-nojs">'
+            '<body class="skin-vector mediawiki">'
+            "<main><p>This is the real article body, with more than enough text "
+            "to clear the SPA threshold and prove the document survived "
+            "boilerplate stripping.</p></main>"
+            '<div class="vector-main-menu">menu junk to drop</div>'
+            "</body></html>"
+        )
+        text, _ = _analyze_html(html)
+        assert "real article body" in text
+        assert "menu junk" not in text  # genuine boilerplate still stripped
+
 
 class TestFetchPage:
     @pytest.mark.asyncio

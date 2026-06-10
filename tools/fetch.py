@@ -97,6 +97,15 @@ def _strip_boilerplate(soup: BeautifulSoup) -> None:
         # on ``.get()``.  Skip detached / attribute-less nodes.
         if getattr(tag, "attrs", None) is None:
             continue
+        # Never strip the document root.  MediaWiki/Wikipedia's Vector skin
+        # puts feature-flag classes like
+        # ``vector-feature-language-in-header-enabled`` on ``<html>`` (and
+        # skin classes on ``<body>``); the boilerplate word-regex matches
+        # "header" inside that compound token and would decompose the entire
+        # document, extracting zero text.  Structural roots are never
+        # boilerplate — only their descendants can be.
+        if tag.name in ("html", "body"):
+            continue
         identifiers = " ".join(
             [
                 " ".join(tag.get("class") or []),
