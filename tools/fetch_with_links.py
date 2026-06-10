@@ -134,37 +134,21 @@ _MIN_ANCHOR_CHARS = 2
 _MAX_ANCHOR_CHARS = 200
 
 
-def _extract_outbound_links(
-    html: str,
-    page_url: str,
-    query: Optional[str],
-) -> list[dict]:
-    """Pull <a href> links from the page body.
+def _collect_link_candidates(html: str, page_url: str) -> list[dict]:
+    """Pull query-INDEPENDENT outbound link candidates from the page body.
 
-    Filters:
+    Filters (unchanged from the original extractor):
       - skip ``#fragment``, ``mailto:``, ``tel:``, ``javascript:`` URLs
-      - skip blocklisted URLs (socials, login, file extensions — see
-        :data:`tools.deep_research._URL_BLOCKLIST_PATTERNS`)
+      - skip blocklisted URLs (socials, login, file extensions)
       - require anchor text in ``[_MIN_ANCHOR_CHARS, _MAX_ANCHOR_CHARS]``
-      - dedupe by URL (keep the first occurrence's anchor)
+      - dedupe by URL (keep the first occurrence's anchor), strip fragments
 
-    If ``query`` is provided, each link is scored by anchor-text +
-    URL-path overlap with the query terms.  Sorted by score desc;
-    links with zero score are still included but ranked last, so a
-    link-heavy page where nothing matches still surfaces something.
-
-    If ``query`` is None, returns links in document order with no
-    score field — useful when the caller wants the raw link graph
-    rather than relevance-ranked links.
+    Returns candidates in document order, each ``{"url", "anchor",
+    "same_domain"}``.  Scoring/ranking is applied separately so the candidate
+    list can be cached and re-ranked per call (lexical or embedding).
     """
     soup = BeautifulSoup(html, "html.parser")
-    # We don't strip boilerplate here — the caller might genuinely want
-    # to see "next/prev article" links or footer reference links the
-    # ``deep_research`` BFS would filter out.  Relevance scoring + the
-    # blocklist do most of the boilerplate filtering on their own.
-
-    query_terms = _query_terms(query) if query else frozenset()
-    page_domain = (urlparse(page_url).netloc.lower().removeprefix("www."))
+    page_domain = urlparse(page_url).netloc.lower().removeprefix("www.")
 
     seen_urls: set[str] = set()
     candidates: list[dict] = []
@@ -181,8 +165,6 @@ def _extract_outbound_links(
             continue
         if _is_blocklisted_url(absolute):
             continue
-        # Strip URL fragments — they almost never carry independent
-        # research value vs the parent URL.
         absolute = absolute.split("#", 1)[0]
         if absolute in seen_urls:
             continue
@@ -191,23 +173,45 @@ def _extract_outbound_links(
             continue
         seen_urls.add(absolute)
         target_domain = urlparse(absolute).netloc.lower().removeprefix("www.")
-        entry: dict = {
-            "url": absolute,
-            "anchor": anchor,
-            "same_domain": target_domain == page_domain,
-        }
-        if query_terms:
-            score = _link_score(anchor, absolute, query_terms)
-            # Same-domain links are mildly penalised so the response
-            # surfaces a more diverse set of follow-up candidates.
-            if entry["same_domain"]:
-                score *= 0.7
-            entry["relevance"] = round(score, 4)
-        candidates.append(entry)
-
-    if query_terms:
-        candidates.sort(key=lambda e: e.get("relevance", 0.0), reverse=True)
+        candidates.append(
+            {
+                "url": absolute,
+                "anchor": anchor,
+                "same_domain": target_domain == page_domain,
+            }
+        )
     return candidates
+
+
+def _rank_links(candidates: list[dict], query: Optional[str]) -> list[dict]:
+    """Lexical ranking (anchor + URL-path term overlap).
+
+    With a ``query``: attach ``relevance`` (× 0.7 same-domain penalty) and sort
+    descending.  Without one (or with an all-stopword query): return candidates
+    in document order with no ``relevance`` field — unchanged legacy behavior.
+    """
+    if not query:
+        return [dict(c) for c in candidates]
+    query_terms = _query_terms(query)
+    if not query_terms:
+        return [dict(c) for c in candidates]
+    ranked: list[dict] = []
+    for c in candidates:
+        score = _link_score(c["anchor"], c["url"], query_terms)
+        if c["same_domain"]:
+            score *= 0.7
+        ranked.append({**c, "relevance": round(score, 4)})
+    ranked.sort(key=lambda e: e.get("relevance", 0.0), reverse=True)
+    return ranked
+
+
+def _extract_outbound_links(
+    html: str,
+    page_url: str,
+    query: Optional[str],
+) -> list[dict]:
+    """Back-compat wrapper: collect candidates then lexically rank them."""
+    return _rank_links(_collect_link_candidates(html, page_url), query)
 
 
 # Description used by server.py when registering this function with FastMCP.

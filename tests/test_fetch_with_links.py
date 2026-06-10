@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from tools.fetch_with_links import (
+    _collect_link_candidates,
     _extract_outbound_links,
+    _rank_links,
     fetch_with_links,
 )
 
@@ -99,6 +101,42 @@ class TestExtractOutboundLinks:
         html = '<a href="https://www.source.com/x">Same site</a>'
         links = _extract_outbound_links(html, "https://source.com/post", query=None)
         assert links[0]["same_domain"] is True
+
+
+class TestCollectAndRank:
+    def test_collect_is_query_independent(self):
+        html = """
+        <html><body>
+          <a href="https://other.com/x">External link here</a>
+          <a href="https://source.com/y">Internal link here</a>
+        </body></html>
+        """
+        cands = _collect_link_candidates(html, "https://source.com/post")
+        by_url = {c["url"]: c for c in cands}
+        assert by_url["https://source.com/y"]["same_domain"] is True
+        assert by_url["https://other.com/x"]["same_domain"] is False
+        # No relevance attached at collection time.
+        assert all("relevance" not in c for c in cands)
+
+    def test_rank_lexical_attaches_relevance_and_sorts(self):
+        cands = [
+            {"url": "https://e.com/banana", "anchor": "Banana bread", "same_domain": False},
+            {"url": "https://e.com/python-async", "anchor": "Python async guide", "same_domain": False},
+        ]
+        ranked = _rank_links(cands, query="python async")
+        assert ranked[0]["url"] == "https://e.com/python-async"
+        assert ranked[0]["relevance"] > 0
+        scores = [r["relevance"] for r in ranked]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_rank_no_query_keeps_order_and_no_relevance(self):
+        cands = [
+            {"url": "https://e.com/a", "anchor": "A link", "same_domain": False},
+            {"url": "https://e.com/b", "anchor": "B link", "same_domain": False},
+        ]
+        ranked = _rank_links(cands, query=None)
+        assert [r["url"] for r in ranked] == ["https://e.com/a", "https://e.com/b"]
+        assert all("relevance" not in r for r in ranked)
 
 
 @pytest.mark.asyncio
