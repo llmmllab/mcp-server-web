@@ -293,8 +293,13 @@ FETCH_WITH_LINKS_DESCRIPTION = (
     "links (with anchor text and optional relevance score against a "
     "query).  The intended pattern is turn-by-turn LLM-driven research: "
     "fetch a page, decide which link to follow next based on what you "
-    "just read, fetch that, repeat.  Pass ``query`` to score links by "
-    "relevance; omit it for raw link-graph output."
+    "just read, fetch that, repeat.  Pass 'query' to score links by "
+    "relevance; omit it for raw link-graph output.  Content is paginated — "
+    "the response carries 'content_total_chars'/'content_has_more'/"
+    "'content_next_offset'; pass 'offset' (and optional 'limit') to read "
+    "beyond the per-call cap.  Leave 'rank_links_by' at \"auto\" (or set "
+    "\"embedding\") to rank links semantically when an embedding endpoint is "
+    "configured; it falls back to lexical ranking otherwise."
 )
 
 

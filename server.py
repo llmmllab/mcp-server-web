@@ -44,7 +44,11 @@ mcp.tool(
     name="fetch_page",
     description=(
         "Fetch and extract readable text content from a web page URL. "
-        "Handles static HTML, SPAs (via Playwright), plain text, and JSON."
+        "Handles static HTML, SPAs (via Playwright), plain text, and JSON. "
+        "Long pages are paginated: the response reports the character range "
+        "and total size, and when more remains it tells you the exact 'offset' "
+        "to call again with. Pass 'offset' (and optional 'limit') to read "
+        "beyond the per-call cap."
     ),
 )(fetch_page)
 
