@@ -18,6 +18,10 @@ Fetch and extract readable text from a URL. Handles static HTML, SPAs (auto-dete
 
 - **url** (required): URL to fetch (http/https only)
 - **render_js**: Force Playwright rendering (default: false)
+- **offset**: Character offset to start at, for paging through long pages (default: 0)
+- **limit**: Max characters returned this call (default/cap: `MAX_CONTENT_LENGTH`)
+
+Long pages are paginated: the response carries a `[chars X-Y of N]` header and, when more remains, an actionable footer telling the model the exact `offset` to call again with. The full extracted page is cached briefly (`CONTENT_CACHE_TTL`) so paging does not re-fetch or re-render the URL.
 
 The extractor strips semantic boilerplate (`<nav>`, `<header>`, `<footer>`, `<aside>`, `<form>`) *plus* any tag whose `class` / `id` / `role` matches a boilerplate pattern (`sidebar`, `related-posts`, `comments`, `share-buttons`, `newsletter-signup`, `cookie-banner`, etc.). It preserves paragraph/heading boundaries (each block becomes its own `\n\n`-separated entry instead of collapsing everything to one space-joined string) and deduplicates adjacent/repeated blocks via a 120-char prefix MD5 — so the same headline appearing in the main article AND a "popular posts" widget shows up only once.
 
@@ -25,10 +29,13 @@ The extractor strips semantic boilerplate (`<nav>`, `<header>`, `<footer>`, `<as
 Fetch a web page and return both its cleaned text AND its outbound links, with anchor text and (when a `query` is supplied) a relevance score.  Pair with `web_search` for a turn-by-turn research loop the model drives natively — no server-side heuristic in the loop.
 
 - **url** (required): The page to fetch (http/https only)
-- **query**: Optional research question; when set, outbound links are scored and sorted by anchor + URL-path overlap with the query terms (content is not filtered — the model is in a better position to decide what's relevant once it has read the page)
+- **query**: Optional research question; when set, outbound links are ranked by relevance (content is not filtered — the model decides what's relevant once it has read the page)
 - **max_links**: Maximum outbound links returned (default 20, clamped to [1, 60])
+- **offset** / **limit**: Content pagination, same semantics as `fetch_page` (default offset 0, cap `MAX_CONTENT_LENGTH`)
+- **rank_links_by**: `auto` (default) | `embedding` | `lexical`. `auto`/`embedding` rank links by semantic similarity when an embedding endpoint resolves and a `query` is present, else lexical
+- **embedding_endpoint** / **embedding_model** / **embedding_api_key**: Optional per-call overrides of the `EMBEDDING_*` config. A per-call endpoint override never receives the config API key
 
-Returns JSON: `{"url", "content", "links": [{"url", "anchor", "same_domain", "relevance"?}, ...]}`.
+Returns JSON: `{"url", "content", "content_offset", "content_returned_chars", "content_total_chars", "content_has_more", "content_next_offset", "links": [{"url", "anchor", "same_domain", "relevance"?}, ...], "link_ranking"}` where `link_ranking` is `"embedding"` or `"lexical"`.
 
 Recommended LLM-driven pattern:
 1. `web_search(query)` → seed URLs
@@ -71,7 +78,13 @@ All settings via environment variables:
 | `SEARX_MAX_RESULTS` | `10` | Default result count |
 | `SEARX_LANGUAGE` | `en` | Search language |
 | `SEARX_SAFESEARCH` | `1` | Safe search level (0/1/2) |
-| `MAX_CONTENT_LENGTH` | `8000` | Max chars returned from fetch |
+| `MAX_CONTENT_LENGTH` | `20000` | Max chars returned per fetch call (pagination window cap) |
+| `CONTENT_CACHE_TTL` | `300` | Seconds a fetched page stays cached for pagination |
+| `CONTENT_CACHE_MAX_ENTRIES` | `64` | Max pages held in the content cache (LRU) |
+| `EMBEDDING_ENDPOINT` | _(empty)_ | OpenAI-compatible base URL (e.g. `.../v1`) for semantic link ranking; empty ⇒ lexical |
+| `EMBEDDING_MODEL` | _(empty)_ | Embedding model name |
+| `EMBEDDING_API_KEY` | _(empty)_ | Bearer token for the embedding endpoint |
+| `EMBEDDING_TIMEOUT` | `10` | Embedding request timeout (seconds) |
 | `REQUEST_TIMEOUT` | `30` | HTTP timeout in seconds |
 | `MCP_TRANSPORT` | `http` | Transport: `http` or `stdio` |
 

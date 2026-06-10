@@ -44,7 +44,8 @@ jobs:
           uv run python -m py_compile \
             server.py config.py \
             tools/search.py tools/fetch.py \
-            tools/fetch_with_links.py tools/deep_research.py
+            tools/fetch_with_links.py tools/deep_research.py \
+            tools/_content_cache.py tools/_pagination.py tools/_embeddings.py
 
       - name: Unit tests
         run: uv run pytest tests/ -v
