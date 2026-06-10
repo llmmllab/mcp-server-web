@@ -56,6 +56,27 @@ spec:
               value: "20000"
             - name: REQUEST_TIMEOUT
               value: "30"
+            # Semantic link ranking for fetch_with_links: the in-cluster
+            # llmmllab OpenAI-compatible API serves /v1/embeddings (proxying to
+            # the nomic-embed-text-v2-moe model on the runner). rank_links_by
+            # defaults to "auto", so embeddings engage whenever a caller passes
+            # a query and fall back to lexical otherwise. EMBEDDING_TIMEOUT is
+            # generous to absorb the embed model's first cold start.
+            - name: EMBEDDING_ENDPOINT
+              value: "http://llmmllab.llmmllab.svc.cluster.local:9999/v1"
+            - name: EMBEDDING_MODEL
+              value: "nomic-embed-text-v2-moe"
+            - name: EMBEDDING_TIMEOUT
+              value: "30"
+            # Same llmmllab credential OpenClaw uses (accepted as a Bearer
+            # API key by the api's auth middleware). optional:true so a missing
+            # secret degrades to lexical ranking instead of crashlooping.
+            - name: EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: LLMMLLAB_API_KEY
+                  optional: true
           resources:
             requests:
               memory: "256Mi"
