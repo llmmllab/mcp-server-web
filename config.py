@@ -43,6 +43,21 @@ SPA_SCRIPT_RATIO = float(os.environ.get("SPA_SCRIPT_RATIO", "0.5"))
 SEARCH_HARD_TIMEOUT = int(os.environ.get("SEARCH_HARD_TIMEOUT", "35"))
 FETCH_HARD_TIMEOUT = int(os.environ.get("FETCH_HARD_TIMEOUT", "75"))
 
+# Content cache — lets the fetch tools paginate a large page across calls
+# without re-fetching (and re-rendering) it every time.  See
+# tools/_content_cache.py.
+CONTENT_CACHE_TTL = float(os.environ.get("CONTENT_CACHE_TTL", "300"))
+CONTENT_CACHE_MAX_ENTRIES = int(os.environ.get("CONTENT_CACHE_MAX_ENTRIES", "64"))
+
+# Optional embedding endpoint for semantic ranking of fetch_with_links
+# outbound links.  All-empty => embeddings off => lexical ranking (default).
+# EMBEDDING_ENDPOINT is the OpenAI-compatible base (e.g. ".../v1"); the
+# embeddings module appends "/embeddings".
+EMBEDDING_ENDPOINT = os.environ.get("EMBEDDING_ENDPOINT", "")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "")
+EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
+EMBEDDING_TIMEOUT = float(os.environ.get("EMBEDDING_TIMEOUT", "10"))
+
 # Server configuration
 MCP_SERVER_BASE_URL = os.environ.get("MCP_SERVER_BASE_URL")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "http")

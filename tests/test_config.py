@@ -60,3 +60,32 @@ class TestConfigDefaults:
     def test_framework_markers_non_empty(self):
         import config  # noqa: F401
         assert len(config.FRAMEWORK_MARKERS) > 0
+
+    def test_content_cache_and_embedding_defaults(self, monkeypatch):
+        for key in list(os.environ.keys()):
+            if key.startswith(("CONTENT_CACHE_", "EMBEDDING_")):
+                monkeypatch.delenv(key, raising=False)
+        import config  # noqa: F401
+        reload(config)
+
+        assert config.CONTENT_CACHE_TTL == 300.0
+        assert config.CONTENT_CACHE_MAX_ENTRIES == 64
+        assert config.EMBEDDING_ENDPOINT == ""
+        assert config.EMBEDDING_MODEL == ""
+        assert config.EMBEDDING_API_KEY == ""
+        assert config.EMBEDDING_TIMEOUT == 10.0
+
+    def test_content_cache_and_embedding_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("CONTENT_CACHE_TTL", "60")
+        monkeypatch.setenv("CONTENT_CACHE_MAX_ENTRIES", "8")
+        monkeypatch.setenv("EMBEDDING_ENDPOINT", "http://emb/v1")
+        monkeypatch.setenv("EMBEDDING_MODEL", "bge")
+        monkeypatch.setenv("EMBEDDING_TIMEOUT", "3")
+        import config  # noqa: F401
+        reload(config)
+
+        assert config.CONTENT_CACHE_TTL == 60.0
+        assert config.CONTENT_CACHE_MAX_ENTRIES == 8
+        assert config.EMBEDDING_ENDPOINT == "http://emb/v1"
+        assert config.EMBEDDING_MODEL == "bge"
+        assert config.EMBEDDING_TIMEOUT == 3.0
