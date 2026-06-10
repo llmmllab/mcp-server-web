@@ -1,10 +1,12 @@
 """Tests for tools/fetch.py — the fetch_page tool and HTML analysis."""
 
+import re
+
 import pytest
 import respx
 import httpx
 
-from tools.fetch import fetch_page, _analyze_html, _truncate
+from tools.fetch import fetch_page, _analyze_html
 from config import MAX_CONTENT_LENGTH, SPA_TEXT_THRESHOLD, SPA_SCRIPT_RATIO
 
 
@@ -62,21 +64,6 @@ class TestAnalyzeHtml:
         text, is_spa = _analyze_html("")
         assert text == ""
         assert is_spa is True  # empty text is below threshold
-
-
-class TestTruncate:
-    def test_no_truncation_when_short(self):
-        assert _truncate("short text") == "short text"
-
-    def test_truncates_when_too_long(self):
-        long_text = "x" * (MAX_CONTENT_LENGTH + 100)
-        result = _truncate(long_text)
-        assert len(result) > MAX_CONTENT_LENGTH  # includes the truncation marker
-        assert "[Content truncated due to length...]" in result
-
-    def test_exact_length_not_truncated(self):
-        exact = "x" * MAX_CONTENT_LENGTH
-        assert _truncate(exact) == exact
 
 
 class TestFetchPage:
@@ -162,11 +149,54 @@ class TestFetchPage:
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_truncation_applied(self):
-        long_html = "<html><body>" + "<p>" + "x" * (MAX_CONTENT_LENGTH + 500) + "</p></body></html>"
+    async def test_small_page_output_unchanged(self):
+        html = "<html><body><h1>Title</h1><p>Short content</p></body></html>"
+        respx.get("https://example.com/small").mock(
+            return_value=httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        )
+        result = await fetch_page("https://example.com/small")
+        assert result.startswith("Content from https://example.com/small:\n\n")
+        assert "[chars" not in result
+        assert "More content available" not in result
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_pagination_first_page_has_offset_footer(self):
+        long_html = "<html><body><p>" + "x" * (MAX_CONTENT_LENGTH + 5000) + "</p></body></html>"
         respx.get("https://example.com/long").mock(
             return_value=httpx.Response(200, text=long_html, headers={"content-type": "text/html"})
         )
-
         result = await fetch_page("https://example.com/long")
-        assert "[Content truncated due to length...]" in result
+        assert "[chars 0-" in result
+        assert "call fetch_page again with offset=" in result
+        assert "[Content truncated due to length...]" not in result
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_pagination_offset_returns_remainder(self):
+        head = "A" * MAX_CONTENT_LENGTH
+        tail = "B" * 3000
+        long_html = f"<html><body><p>{head}{tail}</p></body></html>"
+        respx.get("https://example.com/long2").mock(
+            return_value=httpx.Response(200, text=long_html, headers={"content-type": "text/html"})
+        )
+        page1 = await fetch_page("https://example.com/long2")
+        m = re.search(r"offset=(\d+)", page1)
+        assert m is not None
+        next_off = int(m.group(1))
+        page2 = await fetch_page("https://example.com/long2", offset=next_off)
+        assert "B" in page2
+        assert "call fetch_page again with offset=" not in page2  # last page
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_pagination_uses_cache_no_refetch(self):
+        head = "A" * MAX_CONTENT_LENGTH
+        tail = "B" * 3000
+        long_html = f"<html><body><p>{head}{tail}</p></body></html>"
+        route = respx.get("https://example.com/cached").mock(
+            return_value=httpx.Response(200, text=long_html, headers={"content-type": "text/html"})
+        )
+        await fetch_page("https://example.com/cached")
+        await fetch_page("https://example.com/cached", offset=MAX_CONTENT_LENGTH)
+        assert route.call_count == 1

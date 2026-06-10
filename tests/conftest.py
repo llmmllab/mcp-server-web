@@ -15,3 +15,16 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_content_cache():
+    """Each test starts with an empty fetch cache so a page cached by one test
+    can't bleed into another (and so respx call-count assertions hold)."""
+    from tools._content_cache import content_cache
+
+    content_cache.clear()
+    yield
+    content_cache.clear()

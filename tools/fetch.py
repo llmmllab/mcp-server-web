@@ -31,6 +31,8 @@ from config import (
     SPA_TEXT_THRESHOLD,
     SPA_SCRIPT_RATIO,
 )
+from tools._content_cache import content_cache
+from tools._pagination import window_text
 
 logger = logging.getLogger("mcp-server-web.fetch")
 
@@ -203,12 +205,6 @@ def _analyze_html(html_content: str) -> Tuple[str, bool]:
     return clean_text, is_spa
 
 
-def _truncate(text: str) -> str:
-    if len(text) > MAX_CONTENT_LENGTH:
-        return text[:MAX_CONTENT_LENGTH] + "\n\n[Content truncated due to length...]"
-    return text
-
-
 async def _render_with_playwright(url: str) -> Optional[str]:
     """Render a URL with Playwright; return HTML, or None if unavailable/failed."""
     try:
@@ -236,17 +232,78 @@ async def _render_with_playwright(url: str) -> Optional[str]:
         return None
 
 
-async def _process_html(url: str, html_content: str, allow_spa_fallback: bool) -> str:
-    """Extract text from HTML; optionally fall back to Playwright on SPA pages."""
-    text_content, is_spa = _analyze_html(html_content)
+async def _fetch_full(url: str, render_js: bool) -> tuple[Optional[str], Optional[str]]:
+    """Fetch ``url`` and return its FULL extracted text (no truncation, no
+    "Content from" prefix), or an error message.  Exactly one of
+    ``(full_text, error)`` is non-None.
 
-    if allow_spa_fallback and is_spa:
+    HTML runs through ``_analyze_html`` (+ Playwright SPA fallback on the
+    non-render path); JSON / text bodies are returned verbatim.  This is the
+    cacheable unit that ``fetch_page`` windows for pagination.
+    """
+    if render_js:
         rendered = await _render_with_playwright(url)
-        if rendered:
-            text_content, _ = _analyze_html(rendered)
+        if not rendered:
+            return None, "Error: Playwright rendering failed or not installed."
+        text, _ = _analyze_html(rendered)
+        return text, None
 
-    text_content = _truncate(text_content)
-    return f"Content from {url}:\n\n{text_content}"
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(REQUEST_TIMEOUT),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(url, headers=BROWSER_HEADERS)
+        if response.status_code >= 400:
+            return None, f"Error: HTTP {response.status_code} when accessing {url}"
+
+        content_type = (response.headers.get("content-type") or "").lower()
+        body = response.text
+
+        if "text/html" in content_type:
+            text, is_spa = _analyze_html(body)
+            if is_spa:
+                rendered = await _render_with_playwright(url)
+                if rendered:
+                    text, _ = _analyze_html(rendered)
+            return text, None
+
+        if "application/json" in content_type or "text/" in content_type:
+            return body, None
+
+        return None, (
+            f"Error: URL does not appear to contain readable text "
+            f"(content-type: {content_type})"
+        )
+
+
+def _format_page(url: str, win: dict) -> str:
+    """Render a window dict (from ``window_text``) into the tool's response.
+
+    The common case — the whole document fits one window at offset 0 — is
+    byte-identical to the pre-pagination output.  Paginated responses gain a
+    ``[chars X-Y of N]`` header and, when more remains, an actionable footer.
+    """
+    offset = win["offset"]
+    total = win["total_chars"]
+    text = win["text"]
+
+    if offset == 0 and not win["has_more"]:
+        return f"Content from {url}:\n\n{text}"
+
+    if win["returned_chars"] == 0:
+        return (
+            f"Content from {url} "
+            f"[offset {offset} is at/after end of content ({total} chars)]:\n\n"
+        )
+
+    end = offset + win["returned_chars"]
+    body = f"Content from {url} [chars {offset}-{end} of {total}]:\n\n{text}"
+    if win["has_more"]:
+        body += (
+            f"\n\n[More content available — call fetch_page again with "
+            f"offset={win['next_offset']} to continue.]"
+        )
+    return body
 
 
 async def fetch_html(
@@ -292,57 +349,34 @@ async def fetch_html(
             await client.aclose()
 
 
-async def _fetch_impl(url: str, render_js: bool) -> str:
-    """Inner fetch implementation; wrapped in ``asyncio.wait_for`` below."""
-    if render_js:
-        rendered = await _render_with_playwright(url)
-        if not rendered:
-            return "Error: Playwright rendering failed or not installed."
-        return await _process_html(url, rendered, allow_spa_fallback=False)
-
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(REQUEST_TIMEOUT),
-        follow_redirects=True,
-    ) as client:
-        response = await client.get(url, headers=BROWSER_HEADERS)
-        if response.status_code >= 400:
-            return f"Error: HTTP {response.status_code} when accessing {url}"
-
-        content_type = (response.headers.get("content-type") or "").lower()
-        body = response.text
-
-        if "text/html" in content_type:
-            return await _process_html(url, body, allow_spa_fallback=True)
-
-        if "application/json" in content_type or "text/" in content_type:
-            return f"Content from {url}:\n\n{_truncate(body)}"
-
-        return (
-            f"Error: URL does not appear to contain readable text "
-            f"(content-type: {content_type})"
-        )
-
-
-async def fetch_page(url: str, render_js: bool = False) -> str:
+async def fetch_page(
+    url: str,
+    render_js: bool = False,
+    offset: int = 0,
+    limit: Optional[int] = None,
+) -> str:
     """
-    Read and extract text content from a web page URL.
+    Read and extract text content from a web page URL, with pagination.
 
     Handles HTML (static and SPA), plain text/markdown, JSON, and other
-    text-based content. Auto-detects JavaScript-rendered pages and can
-    fall back to Playwright rendering.
+    text-based content. Auto-detects JavaScript-rendered pages and can fall
+    back to Playwright rendering.
 
-    Reliability: a hard ``asyncio.wait_for`` wraps the entire fetch
-    (``FETCH_HARD_TIMEOUT`` seconds, default 75) on top of httpx's
-    internal timeout — httpx can hang on some DNS/TLS failure modes
-    and Playwright can spin past its 30s timeout while waiting on
-    selectors.  The outer wait_for guarantees a return.
+    Long pages are paginated. Each call returns at most ``limit`` characters
+    (default/maximum ``MAX_CONTENT_LENGTH``) starting at ``offset``. When more
+    content remains, the response reports the total size and the exact
+    ``offset`` to call again with. The full extracted page is cached briefly
+    so paging through it does not re-fetch (or re-render) the URL.
 
     Args:
         url: The URL to read content from (must be http:// or https://).
         render_js: If True, skip httpx and render with Playwright directly.
+        offset: Character offset into the extracted text to start at (default 0).
+        limit: Max characters to return this call (default/cap MAX_CONTENT_LENGTH).
 
     Returns:
-        Clean text content from the web page, or error message if fetch fails.
+        Clean text content from the web page (with a pagination header/footer
+        when the content spans multiple windows), or an error message.
     """
     try:
         parsed_url = urlparse(url)
@@ -351,31 +385,44 @@ async def fetch_page(url: str, render_js: bool = False) -> str:
     except Exception as e:
         return f"Error: Invalid URL format '{url}': {str(e)}"
 
-    try:
-        result = await asyncio.wait_for(
-            _fetch_impl(url, render_js), timeout=FETCH_HARD_TIMEOUT
-        )
-        logger.info(
-            "fetch_page completed",
-            extra={
-                "url": url,
-                "render_js": render_js,
-                "result_bytes": len(result),
-            },
-        )
-        return result
-    except asyncio.TimeoutError:
-        msg = (
-            f"Error: Timeout when trying to access {url} "
-            f"({FETCH_HARD_TIMEOUT} seconds, hard cap)"
-        )
-        logger.warning(msg, extra={"url": url})
-        return msg
-    except httpx.RequestError as e:
-        msg = f"Error: Network error when accessing {url}: {str(e)}"
-        logger.warning(msg, extra={"url": url})
-        return msg
-    except Exception as e:
-        msg = f"Error: Failed to read content from {url}: {str(e)}"
-        logger.error(msg, extra={"url": url})
-        return msg
+    cache_key = f"page:{int(render_js)}:{url}"
+    full_text = content_cache.get(cache_key)
+
+    if full_text is None:
+        try:
+            full_text, error = await asyncio.wait_for(
+                _fetch_full(url, render_js), timeout=FETCH_HARD_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            msg = (
+                f"Error: Timeout when trying to access {url} "
+                f"({FETCH_HARD_TIMEOUT} seconds, hard cap)"
+            )
+            logger.warning(msg, extra={"url": url})
+            return msg
+        except httpx.RequestError as e:
+            msg = f"Error: Network error when accessing {url}: {str(e)}"
+            logger.warning(msg, extra={"url": url})
+            return msg
+        except Exception as e:
+            msg = f"Error: Failed to read content from {url}: {str(e)}"
+            logger.error(msg, extra={"url": url})
+            return msg
+        if error is not None:
+            return error  # errors are returned, never cached
+        content_cache.put(cache_key, full_text)
+
+    win = window_text(full_text, offset, limit if limit is not None else MAX_CONTENT_LENGTH)
+    result = _format_page(url, win)
+    logger.info(
+        "fetch_page completed",
+        extra={
+            "url": url,
+            "render_js": render_js,
+            "offset": win["offset"],
+            "total_chars": win["total_chars"],
+            "has_more": win["has_more"],
+            "result_bytes": len(result),
+        },
+    )
+    return result
