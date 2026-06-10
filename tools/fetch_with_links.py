@@ -43,6 +43,8 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from config import FETCH_HARD_TIMEOUT, MAX_CONTENT_LENGTH
+from tools._content_cache import content_cache
+from tools._pagination import window_text
 from tools.fetch import (
     _analyze_html,
     fetch_html,
@@ -229,25 +231,25 @@ async def fetch_with_links(
     url: str,
     query: Optional[str] = None,
     max_links: int = _DEFAULT_MAX_LINKS,
+    offset: int = 0,
+    limit: Optional[int] = None,
 ) -> str:
-    """Fetch ``url`` and return text content + outbound links as JSON.
+    """Fetch ``url`` and return windowed text content + outbound links as JSON.
 
     Args:
         url: The page to fetch (http:// or https:// only).
-        query: Optional research question.  When set, outbound links
-            are scored by anchor-text + URL-path overlap with the
-            query terms and the response sorts links by descending
-            score.  The text content itself is NOT filtered by
-            ``query`` — the calling LLM is in a better position to
-            decide what's relevant once it has read the full page.
+        query: Optional research question. When set, outbound links are ranked
+            by relevance. The text content is NOT filtered by ``query``.
         max_links: Maximum links returned (capped at ``_HARD_MAX_LINKS``).
-            Defaults to 20 — enough to give the model good choice
-            without flooding its context with nav cruft.
+        offset: Character offset into the extracted content (default 0).
+        limit: Max content characters this call (default/cap MAX_CONTENT_LENGTH).
 
     Returns:
-        JSON envelope ``{"url", "content", "links": [...], "error"?}``.
-        Each link dict has ``url``, ``anchor``, ``same_domain``, and
-        (if ``query`` was set) ``relevance``.
+        JSON envelope ``{"url", "content", "content_offset",
+        "content_returned_chars", "content_total_chars", "content_has_more",
+        "content_next_offset", "links": [...], "link_ranking", "error"?}``.
+        The full extracted page + link candidates are cached briefly so paging
+        through content does not re-fetch the URL.
     """
     try:
         parsed = urlparse(url)
@@ -267,52 +269,67 @@ async def fetch_with_links(
 
     max_links = max(1, min(max_links, _HARD_MAX_LINKS))
 
-    try:
-        html = await asyncio.wait_for(
-            fetch_html(url), timeout=FETCH_HARD_TIMEOUT
-        )
-    except asyncio.TimeoutError:
-        return json.dumps(
-            {
-                "url": url,
-                "error": f"Fetch timed out after {FETCH_HARD_TIMEOUT}s",
-                "content": "",
-                "links": [],
-            }
-        )
+    cache_key = f"links:{url}"
+    cached = content_cache.get(cache_key)
+    if cached is None:
+        try:
+            html = await asyncio.wait_for(fetch_html(url), timeout=FETCH_HARD_TIMEOUT)
+        except asyncio.TimeoutError:
+            return json.dumps(
+                {
+                    "url": url,
+                    "error": f"Fetch timed out after {FETCH_HARD_TIMEOUT}s",
+                    "content": "",
+                    "links": [],
+                }
+            )
+        if not html:
+            return json.dumps(
+                {
+                    "url": url,
+                    "error": "Failed to fetch page (HTTP error, non-HTML content, or network error).",
+                    "content": "",
+                    "links": [],
+                }
+            )
+        cached = {
+            "content": _analyze_html(html)[0],
+            "link_candidates": _collect_link_candidates(html, url),
+            "embeddings_by_model": {},
+        }
+        content_cache.put(cache_key, cached)
 
-    if not html:
-        return json.dumps(
-            {
-                "url": url,
-                "error": "Failed to fetch page (HTTP error, non-HTML content, or network error).",
-                "content": "",
-                "links": [],
-            }
-        )
+    content_full = cached["content"]
+    candidates = cached["link_candidates"]
 
-    # Reuse fetch_page's full analyze pipeline (boilerplate strip,
-    # block extraction, dedup) — same extraction quality as the
-    # standalone fetch_page tool.
-    content, _is_spa = _analyze_html(html)
-    if len(content) > MAX_CONTENT_LENGTH:
-        content = content[:MAX_CONTENT_LENGTH] + "\n\n[Content truncated due to length...]"
+    ranked = _rank_links(candidates, query)
+    link_ranking = "lexical"
+    links = ranked[:max_links]
 
-    links = _extract_outbound_links(html, url, query)[:max_links]
+    win = window_text(content_full, offset, limit if limit is not None else MAX_CONTENT_LENGTH)
 
     logger.info(
         "fetch_with_links completed",
         extra={
             "url": url,
             "query": query,
-            "content_chars": len(content),
+            "content_offset": win["offset"],
+            "content_total_chars": win["total_chars"],
+            "content_has_more": win["has_more"],
             "links_returned": len(links),
+            "link_ranking": link_ranking,
         },
     )
     return json.dumps(
         {
             "url": url,
-            "content": content,
+            "content": win["text"],
+            "content_offset": win["offset"],
+            "content_returned_chars": win["returned_chars"],
+            "content_total_chars": win["total_chars"],
+            "content_has_more": win["has_more"],
+            "content_next_offset": win["next_offset"],
             "links": links,
+            "link_ranking": link_ranking,
         }
     )

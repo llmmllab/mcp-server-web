@@ -205,3 +205,32 @@ class TestFetchWithLinks:
                 )
             )
         assert len(result["links"]) == 5
+
+    async def test_content_pagination_fields_and_offset(self):
+        head = "A" * 20000  # == default MAX_CONTENT_LENGTH window
+        tail = "B" * 2000
+        html = (
+            f"<html><body><article><p>{head}{tail}</p>"
+            f"<a href='https://example.org/some-article'>link text here</a></article></body></html>"
+        )
+        with patch(
+            "tools.fetch_with_links.fetch_html",
+            new=AsyncMock(return_value=html),
+        ) as m:
+            p1 = json.loads(await fetch_with_links("https://example.com/a", query="alpha"))
+            p2 = json.loads(
+                await fetch_with_links(
+                    "https://example.com/a", query="alpha", offset=p1["content_next_offset"]
+                )
+            )
+        assert p1["content_offset"] == 0
+        assert p1["content_total_chars"] == 22000
+        assert p1["content_has_more"] is True
+        assert p1["content_next_offset"] == 20000
+        assert p1["link_ranking"] == "lexical"
+        assert "B" in p2["content"]
+        assert p2["content_has_more"] is False
+        assert p2["content_next_offset"] is None
+        # Links served from cache on page 2 — identical, and only one fetch.
+        assert p2["links"] == p1["links"]
+        assert m.await_count == 1
