@@ -293,7 +293,7 @@ def _format_page(url: str, win: dict) -> str:
     if win["returned_chars"] == 0:
         return (
             f"Content from {url} "
-            f"[offset {offset} is at/after end of content ({total} chars)]:\n\n"
+            f"[offset {offset} is past the end of content; {total} chars total]."
         )
 
     end = offset + win["returned_chars"]

@@ -186,7 +186,29 @@ class TestFetchPage:
         next_off = int(m.group(1))
         page2 = await fetch_page("https://example.com/long2", offset=next_off)
         assert "B" in page2
+        assert "[chars " in page2  # non-first page still shows the range header
         assert "call fetch_page again with offset=" not in page2  # last page
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_offset_past_end_message(self):
+        html = "<html><body><p>Some content here that is long enough.</p></body></html>"
+        respx.get("https://example.com/short").mock(
+            return_value=httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        )
+        result = await fetch_page("https://example.com/short", offset=99999)
+        assert "past the end of content" in result
+        assert "More content available" not in result
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_empty_extracted_content(self):
+        respx.get("https://example.com/empty").mock(
+            return_value=httpx.Response(200, text="<html><body></body></html>", headers={"content-type": "text/html"})
+        )
+        result = await fetch_page("https://example.com/empty")
+        assert result == "Content from https://example.com/empty:\n\n"
+        assert "[chars" not in result
 
     @respx.mock
     @pytest.mark.asyncio

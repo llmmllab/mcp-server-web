@@ -7,6 +7,15 @@ the same way :mod:`server` does at production startup keeps the
 decorator-time tool registration happy.
 """
 
+import os
+
+# Disable Playwright's real-browser SPA fallback during tests: point the
+# browser path at a nonexistent dir so chromium.launch() fails fast and
+# _render_with_playwright returns None. This matches CI (no Chromium binary)
+# and makes respx-mocked fetch tests deterministic instead of leaking to the
+# live internet. setdefault so a dev who wants real browsers can override.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/nonexistent-mcp-server-web-tests")
+
 import sys
 from pathlib import Path
 
