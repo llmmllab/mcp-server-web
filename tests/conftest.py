@@ -8,6 +8,10 @@ decorator-time tool registration happy.
 """
 
 import os
+import sys
+from pathlib import Path
+
+import pytest
 
 # Disable Playwright's real-browser SPA fallback during tests: point the
 # browser path at a nonexistent dir so chromium.launch() fails fast and
@@ -16,16 +20,11 @@ import os
 # live internet. setdefault so a dev who wants real browsers can override.
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/nonexistent-mcp-server-web-tests")
 
-import sys
-from pathlib import Path
-
 # Ensure the project root is importable as the tools refer to
 # ``from server import mcp`` and ``from config import ...``.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import pytest
 
 
 @pytest.fixture(autouse=True)

@@ -11,7 +11,6 @@ from tools.fetch_with_links import (
     _rank_links,
     fetch_with_links,
 )
-from tools._content_cache import content_cache
 
 
 class TestExtractOutboundLinks:
